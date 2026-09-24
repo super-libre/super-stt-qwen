@@ -36,6 +36,10 @@
         rev = "1e9de733d6ff94f34c34a5765ea0b4926478f989",
         features = ["default", "cubecl"]
     }
+    # The binary's build ID, which CubeCL keys its compiled kernels on: the
+    # warm marker in `model.rs` goes by the same key. Already in the graph
+    # through CubeCL.
+    buildid = "1"
     burn-store = {
         git = "https://github.com/jorge-menjivar/burn.git",
         rev = "1e9de733d6ff94f34c34a5765ea0b4926478f989",

@@ -12,8 +12,11 @@
 //! `Send`, so it lives on [`crate::model_thread`] and the handlers send it
 //! jobs.
 
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use burn::prelude::Device;
@@ -22,6 +25,7 @@ use tokenizers::Tokenizer;
 
 use crate::audio;
 use crate::lang::Language;
+use crate::progress::{Finish, Measure, Phase, Report, Step, Tracker};
 use crate::prompt;
 use crate::qwen3::audio::{MelFilters, SAMPLE_RATE, frame_count, log_mel_spectrogram};
 use crate::qwen3::config::{Config, GenerationConfig};
@@ -82,6 +86,20 @@ const WARM_UP_SECONDS: [f64; 6] = [1.0, 4.0, 10.0, 20.0, 40.0, 90.0];
 /// The one rung a CPU build warms, which compiles nothing: it only proves the
 /// whole path runs before `ready` says so.
 const CPU_WARM_UP_SECONDS: f64 = 2.0;
+
+/// The audio lengths this build's warm-up transcribes.
+fn warm_up_ladder() -> &'static [f64] {
+    if ON_GPU {
+        &WARM_UP_SECONDS
+    } else {
+        &[CPU_WARM_UP_SECONDS]
+    }
+}
+
+/// Transcriptions a warm-up runs: every length, in both prompts.
+fn warm_up_runs() -> u64 {
+    2 * warm_up_ladder().len() as u64
+}
 
 /// Tokens each warm-up rung decodes. Enough to replay the captured step, and
 /// no more: the step's shape does not change from one token to the next.
@@ -151,8 +169,8 @@ const ON_GPU: bool = cfg!(any(
 /// A half-width type halves the weights and the bandwidth on a GPU. On the CPU
 /// it is slower than f32 rather than faster.
 ///
-/// bf16 is what the reference ran in and what CUDA and ROCm get, where the
-/// device computes in it. Never on Vulkan, whatever the device reports: the
+/// bf16 is what the reference ran in and what CUDA gets, where the device
+/// computes in it. Never on Vulkan, whatever the device reports: the
 /// SPIR-V extension for bf16 allows no arithmetic on it, yet CubeCL emits some,
 /// and NVIDIA's driver crashes compiling it. Vulkan gets f16 instead. It
 /// holds this model's activations, which peak near 1.1e4 in the 1.7B decoder,
@@ -165,8 +183,13 @@ const ON_GPU: bool = cfg!(any(
 /// arrived with Apple's M-series GPUs and a recent Metal, and CubeCL's bf16
 /// has only ever run here on CUDA. A device that computes in neither type gets
 /// f32.
+///
+/// So does ROCm, on every AMD card. CubeCL's HIP runtime compiles through its
+/// LLVM backend, which has no lowering for `cube.bf16`, yet reports bf16
+/// supported: every kernel using it fails to compile. The Voxtral backend met
+/// this on a gfx1013 and gets CUDA's transcripts word for word there in f16.
 fn compute_dtype(device: &Device) -> DType {
-    let half = if matches!(BUILT_FOR, "vulkan" | "metal") {
+    let half = if matches!(BUILT_FOR, "vulkan" | "metal" | "rocm") {
         DType::F16
     } else {
         DType::BF16
@@ -261,6 +284,62 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
     (Device::default(), BUILT_FOR)
 }
 
+// What a cold warm-up wrote on an RTX 3090 (see [`expected_cache_entries`]),
+// ROCm taken to be CUDA and Metal to be Vulkan, unmeasured.
+const CUDA_ENTRIES_0_6B: u64 = 1480;
+const CUDA_ENTRIES_1_7B: u64 = 1423;
+const VULKAN_ENTRIES_0_6B: u64 = 521;
+const VULKAN_ENTRIES_1_7B: u64 = 527;
+
+/// Where `CubeCL` keeps this backend's kernels, once [`configure_kernel_cache`]
+/// has said.
+static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The entries a first load's warm-up writes to the kernel cache, which is
+/// what its `building_kernels` progress is measured against: tuning results
+/// and compiled kernels both. Only the pace of the bar rides on it; past the
+/// estimate it slows down short of the end rather than stopping (see
+/// [`crate::progress`]).
+fn expected_cache_entries(model_name: &str) -> u64 {
+    let large = model_name.ends_with("1.7b");
+    if cfg!(any(feature = "cuda", feature = "rocm")) {
+        if large {
+            CUDA_ENTRIES_1_7B
+        } else {
+            CUDA_ENTRIES_0_6B
+        }
+    } else if large {
+        VULKAN_ENTRIES_1_7B
+    } else {
+        VULKAN_ENTRIES_0_6B
+    }
+}
+
+/// Where a load records that `model` finished a warm-up with this build, so
+/// that the next load of it is not an initial setup. It sits beside the
+/// kernels it vouches for, so clearing the cache clears it too.
+///
+/// Named by the binary's build ID, which is what `CubeCL` keys its compiled
+/// kernels on: any rebuild, a release that keeps its version included,
+/// recompiles all of them, and should say so. Without a build ID the crate
+/// version stands in; every release asset has one, the GNU build ID on Linux
+/// and `LC_UUID` on macOS.
+fn warm_marker(model: &str) -> Option<PathBuf> {
+    let build = buildid::build_id().map_or_else(
+        || env!("CARGO_PKG_VERSION").to_string(),
+        |id| {
+            id.iter().fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+        },
+    );
+    CACHE_DIR.get().map(|dir| {
+        dir.join("qwen3-asr-warm")
+            .join(format!("{model}-{BUILT_FOR}-{build}"))
+    })
+}
+
 /// Point `CubeCL`'s kernel cache at `cache_dir`.
 ///
 /// `CubeCL` compiles every kernel it meets at runtime and keeps them on disk so
@@ -277,99 +356,13 @@ pub fn configure_kernel_cache(cache_dir: &Path) {
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
     config.compilation.cache = true;
     config.environment.path = CacheConfig::Directory(cache_dir.to_path_buf());
+    let _ = CACHE_DIR.set(cache_dir.to_path_buf());
     // `false` means something already read the configuration and this call is
     // too late to matter. Nothing in this backend touches a device before
     // `main` calls this, so it is a guard rather than a case to handle.
     if !CubeClRuntimeConfig::try_set(config) {
         log::warn!("the CubeCL configuration was already read; the kernel cache keeps its default");
     }
-}
-
-/// The pre-warmed autotune cache, shipped in the release tarball beside the
-/// binary rather than downloaded.
-///
-/// One file for every GPU and every model: nothing in the cache is keyed by
-/// model — the namespaces are keyed by `CubeCL` version, device and kernel
-/// family — so entries a machine cannot use are simply never looked up.
-const KERNEL_BUNDLE: &str = "kernels/autotune.bundle";
-
-/// Seed the kernel cache from the bundle in this build, if there is one.
-///
-/// `CubeCL` compiles every kernel it meets at runtime and then *autotunes*
-/// several candidates per operation per shape, and the tuning is the slow half
-/// of a cold load. A bundle is that tuning, done once per GPU and shipped.
-///
-/// Best-effort by construction: every failure here is a slow load rather than
-/// a broken one, which is why this warns and returns instead of failing. Must
-/// run after [`configure_kernel_cache`] and before anything touches a device.
-pub fn import_kernel_bundle(backend_dir: &Path) {
-    let path = backend_dir.join(KERNEL_BUNDLE);
-    if !path.is_file() {
-        log::info!(
-            "no {KERNEL_BUNDLE} in this build; every operation is tuned on this machine, \
-             which is the slow part of a first load"
-        );
-        return;
-    }
-    let started = std::time::Instant::now();
-    let bundle = match burn::cubecl::bundle::open(&path) {
-        Ok(bundle) => bundle,
-        Err(err) => {
-            log::warn!("ignoring {}: {err}", path.display());
-            return;
-        }
-    };
-    let report = burn::cubecl::bundle::import(bundle.as_ref());
-    // `skipped` counts keys the cache already held: the import is insert-only
-    // and idempotent.
-    log::info!(
-        "imported {} kernel-cache entries from {KERNEL_BUNDLE} in {:.1?} \
-         ({} namespaces, {} already present, {} refused)",
-        report.imported,
-        started.elapsed(),
-        report.namespaces.len(),
-        report.skipped,
-        report.failed
-    );
-}
-
-/// Write the current kernel cache out as a bundle, for shipping.
-///
-/// The other half of [`import_kernel_bundle`]: there is no way to produce a
-/// bundle except by running the work on the hardware it is for. Call it after
-/// a load, which warms the cache by running the same ladder a first request
-/// would. Autotune results only unless `everything`: they are the expensive
-/// half to produce and the durable one — a compiled kernel dies with the next
-/// build, a tuning result is keyed by operation and shape and does not.
-///
-/// # Errors
-/// Returns an error if the cache cannot be read or `out` cannot be written.
-pub fn export_kernel_bundle(out: &Path, name: &str, everything: bool) -> Result<()> {
-    use burn::cubecl::bundle::{BundleFormat, ExportOptions};
-
-    let namespaces = if everything {
-        Vec::new()
-    } else {
-        vec!["autotune".to_string(), "throughput".to_string()]
-    };
-    let options = ExportOptions {
-        name: name.to_string(),
-        format: BundleFormat::Sqlite,
-        namespaces,
-        ..Default::default()
-    };
-    let manifest =
-        burn::cubecl::bundle::export(&[burn::cubecl::environment::path()], out, &options)
-            .map_err(|err| anyhow!("exporting the kernel cache to {}: {err}", out.display()))?;
-    let tenths = std::fs::metadata(out).map_or(0, |m| m.len() * 10 / (1024 * 1024));
-    log::info!(
-        "wrote {} ({}.{} MB) for CubeCL {}",
-        out.display(),
-        tenths / 10,
-        tenths % 10,
-        manifest.cubecl_version
-    );
-    Ok(())
 }
 
 /// Why a load failed, in the two words `GET /v1/status` has for it.
@@ -515,8 +508,8 @@ pub(crate) fn catching<T>(f: impl FnOnce() -> T) -> Result<T, String> {
 }
 
 impl QwenAsr {
-    /// Load `model_name` from a backend directory, reporting progress in
-    /// `0.0..=1.0` as it goes.
+    /// Load `model_name` from a backend directory, then warm it up, reporting
+    /// how far it has got into `report` as it goes.
     ///
     /// # Errors
     /// [`LoadError::DeviceUnavailable`] if the accelerator cannot be
@@ -525,8 +518,47 @@ impl QwenAsr {
         backend_dir: &Path,
         model_name: &str,
         device: Option<&str>,
-        progress: &dyn Fn(f32),
+        report: &(dyn Fn(Report) + Sync),
     ) -> Result<Self, LoadError> {
+        // A CPU build compiles no kernels, so it has no first load to set
+        // apart. A GPU build without a cache directory compiles on every load,
+        // and every load is an initial setup.
+        let marker = warm_marker(model_name).filter(|_| ON_GPU);
+        let phase = if !ON_GPU || marker.as_ref().is_some_and(|m| m.exists()) {
+            Phase::Loading
+        } else {
+            Phase::InitialSetup
+        };
+        log::info!("loading {model_name} ({phase:?})");
+        let tracker = Tracker::new(phase, report);
+        let (model, warmed) = std::thread::scope(|scope| {
+            scope.spawn(|| tracker.run());
+            // Stops the sampler however this ends, a panic included: the
+            // scope waits for it before it lets a panic through.
+            let _finish = Finish(&tracker);
+            Self::load_tracked(backend_dir, model_name, device, phase, &tracker)
+        })?;
+        if warmed && let Some(marker) = marker {
+            let written = marker
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&marker, b""));
+            if let Err(e) = written {
+                log::warn!("could not mark {} warm: {e}", marker.display());
+            }
+        }
+        Ok(model)
+    }
+
+    /// [`Self::load`] under its tracker. Returns the model and whether its
+    /// warm-up ran to the end.
+    fn load_tracked(
+        backend_dir: &Path,
+        model_name: &str,
+        device: Option<&str>,
+        phase: Phase,
+        tracker: &Tracker<'_>,
+    ) -> Result<(Self, bool), LoadError> {
         let dir = backend_dir.join("models").join(model_name);
         let config_file = model_file(&dir, "config.json")?;
         let generation_file = model_file(&dir, "generation_config.json")?;
@@ -561,11 +593,22 @@ impl QwenAsr {
             dir.display()
         );
         let started = std::time::Instant::now();
-        progress(0.05);
-        let model = Qwen3Asr::load(&config, &weights, dtype, &device)
+        let total = weights.iter().try_fold(0, |sum, shard| {
+            std::fs::metadata(shard)
+                .map(|m| sum + m.len())
+                .with_context(|| format!("reading {}", shard.display()))
+        })?;
+        let read = Arc::new(AtomicU64::new(0));
+        tracker.enter(
+            Step::LoadingWeights,
+            Measure::Count {
+                done: Arc::clone(&read),
+                total,
+            },
+        );
+        let model = Qwen3Asr::load(&config, &weights, dtype, &device, &read)
             .map_err(|e| anyhow!("building the model from {}: {e}", dir.display()))?;
         log::info!("mapped the weights in {:.1?}", started.elapsed());
-        progress(0.5);
 
         let mut model = Self {
             model,
@@ -574,8 +617,29 @@ impl QwenAsr {
             eos: generation.eos_token_id,
             device_name,
         };
-        model.warm_up(progress);
-        Ok(model)
+        let runs = Arc::new(AtomicU64::new(0));
+        let measure = match phase {
+            Phase::InitialSetup => (
+                Step::BuildingKernels,
+                Measure::cache_entries(expected_cache_entries(model_name)),
+            ),
+            Phase::Loading => (
+                Step::WarmingUp,
+                Measure::Count {
+                    done: Arc::clone(&runs),
+                    total: warm_up_runs(),
+                },
+            ),
+        };
+        let entries = crate::progress::cache_entries();
+        tracker.enter(measure.0, measure.1);
+        let warmed = model.warm_up(&runs).map_err(LoadError::Failed);
+        // What `expected_cache_entries` is calibrated against, on a cold load.
+        log::info!(
+            "the warm-up wrote {} kernel-cache entries",
+            crate::progress::cache_entries().saturating_sub(entries)
+        );
+        Ok((model, warmed?))
     }
 
     /// The device the model is actually running on, as `GET /v1/status`
@@ -593,18 +657,19 @@ impl QwenAsr {
     /// `GET /v1/status` has already said `ready`. See [`WARM_UP_SECONDS`] for
     /// why the clips are several lengths rather than one.
     ///
-    /// A failure here is logged and swallowed: the model is loaded and usable,
-    /// and refusing the load over a warm-up would turn a slow first request
-    /// into no service at all.
-    fn warm_up(&mut self, progress: &dyn Fn(f32)) {
-        let ladder: &[f64] = if ON_GPU {
-            &WARM_UP_SECONDS
-        } else {
-            &[CPU_WARM_UP_SECONDS]
-        };
+    /// A failure after the first run is logged and swallowed: the model
+    /// transcribes, and refusing the load over a longer clip would turn a slow
+    /// first request into no service at all. A failure on the first run fails
+    /// the load, because then nothing transcribes — a device that says it
+    /// computes in a type its compiler cannot lower fails every kernel, and a
+    /// load that reported `ready` would fail every request after it.
+    ///
+    /// Counts each run into `runs` as it ends, and returns whether all
+    /// [`warm_up_runs`] of them did.
+    fn warm_up(&mut self, runs: &AtomicU64) -> Result<bool> {
+        let ladder = warm_up_ladder();
         let started = std::time::Instant::now();
-        #[allow(clippy::cast_precision_loss)]
-        for (rung, &seconds) in ladder.iter().enumerate() {
+        for &seconds in ladder {
             let samples = warm_up_audio(seconds);
             // Both prompts a request can make: a language to detect and one
             // named. They differ in length, and a fresh machine that warmed
@@ -617,25 +682,27 @@ impl QwenAsr {
                     tokens <= WARM_UP_TOKENS
                 };
                 let result = catching(|| self.transcribe(&samples, language, keep_going, |_| {}));
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => {
-                        log::warn!("the warm-up failed at {seconds}s: {e:#}");
-                        return;
+                let error = match result {
+                    Ok(Ok(_)) => None,
+                    Ok(Err(e)) => Some(format!("{e:#}")),
+                    Err(panic) => Some(format!("panicked: {panic}")),
+                };
+                if let Some(error) = error {
+                    if runs.load(Ordering::Relaxed) == 0 {
+                        anyhow::bail!("the model cannot transcribe: {error}");
                     }
-                    Err(panic) => {
-                        log::warn!("the warm-up panicked at {seconds}s: {panic}");
-                        return;
-                    }
+                    log::warn!("the warm-up failed at {seconds}s: {error}");
+                    return Ok(false);
                 }
+                runs.fetch_add(1, Ordering::Relaxed);
             }
-            progress(0.5 + 0.5 * (rung + 1) as f32 / ladder.len() as f32);
         }
         log::info!(
             "warmed {} audio lengths up in {:.1?}",
             ladder.len(),
             started.elapsed()
         );
+        Ok(true)
     }
 
     fn encode(&self, text: &str) -> Result<Vec<u32>> {

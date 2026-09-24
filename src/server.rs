@@ -24,14 +24,15 @@ use serde_json::{Value, json};
 use crate::lang::{self, Language};
 use crate::model::{self, LoadError, Outcome, QwenAsr};
 use crate::model_thread::ModelThread;
+use crate::progress::Report;
 
 /// Where the model is in its lifecycle, as `GET /v1/status` reports it.
 #[derive(Debug, Clone, PartialEq)]
 enum LoadState {
     /// Serving, but no model has been asked for yet.
     Starting,
-    /// A `POST /v1/load` is in flight.
-    Loading { model: String, progress: f32 },
+    /// A `POST /v1/load` is in flight, and how far it has got.
+    Loading { model: String, report: Report },
     /// Ready to transcribe.
     Ready { model: String, device: &'static str },
     /// The load failed, for the contract's `reason`.
@@ -77,11 +78,11 @@ impl AppState {
             .clone()
     }
 
-    /// Record load progress, unless the load has already ended.
-    fn set_progress(&self, value: f32) {
+    /// Record how far a load has got, unless it has already ended.
+    fn set_report(&self, value: Report) {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        if let LoadState::Loading { progress, .. } = &mut *state {
-            *progress = value.clamp(0.0, 1.0);
+        if let LoadState::Loading { report, .. } = &mut *state {
+            *report = value;
         }
     }
 }
@@ -111,10 +112,20 @@ async fn status(State(s): State<Arc<AppState>>) -> Json<Value> {
     let mut body = json!({ "status": "success", "reason": null });
     match s.state() {
         LoadState::Starting => body["state"] = json!("starting"),
-        LoadState::Loading { model, progress } => {
+        LoadState::Loading { model, report } => {
             body["state"] = json!("loading");
-            body["progress"] = json!(progress);
             body["model"] = json!({ "name": model });
+            // Each only while loading, and only once the load has said: an
+            // absent `progress` reads as indeterminate.
+            if let Some(phase) = report.phase {
+                body["phase"] = json!(phase.as_str());
+            }
+            if let Some(step) = report.step {
+                body["step"] = json!(step.as_str());
+            }
+            if let Some(progress) = report.progress {
+                body["progress"] = json!(progress);
+            }
         }
         LoadState::Ready { model, device } => {
             body["state"] = json!("ready");
@@ -168,13 +179,13 @@ async fn load(State(s): State<Arc<AppState>>, body: Option<Json<LoadRequest>>) -
         }
         *state = LoadState::Loading {
             model: name.clone(),
-            progress: 0.0,
+            report: Report::default(),
         };
     }
 
     let state = Arc::clone(&s);
     let queued = s.model.submit(move |slot| {
-        let progress = |p: f32| state.set_progress(p);
+        let report = |r: Report| state.set_report(r);
         // A panic here — an allocation the device refused while the weights
         // were mapped, or a lost device while the old model's memory was
         // freed, say — would otherwise be caught by the model thread and
@@ -183,7 +194,7 @@ async fn load(State(s): State<Arc<AppState>>, body: Option<Json<LoadRequest>>) -
             // The previous model's memory goes first: two resident at once
             // is what a GPU sized for one of them cannot hold.
             *slot = None;
-            QwenAsr::load(&state.backend_dir, &name, device.as_deref(), &progress)
+            QwenAsr::load(&state.backend_dir, &name, device.as_deref(), &report)
         })
         .unwrap_or_else(|panic| Err(LoadError::Failed(anyhow::anyhow!("panicked: {panic}"))));
         match loaded {
@@ -450,6 +461,7 @@ fn json_error(status: StatusCode, code: &str, detail: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress::{Phase, Step};
     use axum::http::Request;
     use tower::ServiceExt;
 
@@ -533,17 +545,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_progress_while_loading() {
+    async fn status_reports_load_progress_only_while_loading() {
         let (app, state) = app();
         state.set_state(LoadState::Loading {
             model: "qwen3-asr-1.7b".to_string(),
-            progress: 0.0,
+            report: Report::default(),
         });
-        state.set_progress(0.5);
-        let (_, body) = call(app, get("/v1/status")).await;
+        let (_, body) = call(app.clone(), get("/v1/status")).await;
         assert_eq!(body["state"], "loading");
+        for field in ["phase", "step", "progress"] {
+            assert!(body.get(field).is_none(), "{field} before the load said");
+        }
+        state.set_report(Report {
+            phase: Some(Phase::InitialSetup),
+            step: Some(Step::BuildingKernels),
+            progress: Some(0.5),
+        });
+        let (_, body) = call(app.clone(), get("/v1/status")).await;
+        assert_eq!(body["phase"], "initial_setup");
+        assert_eq!(body["step"], "building_kernels");
         assert_eq!(body["progress"], 0.5);
         assert_eq!(body["model"]["name"], "qwen3-asr-1.7b");
+
+        // A report that arrives after the load ended changes nothing.
+        ready(&state);
+        state.set_report(Report {
+            phase: Some(Phase::Loading),
+            ..Report::default()
+        });
+        let (_, body) = call(app, get("/v1/status")).await;
+        assert_eq!(body["state"], "ready");
+        for field in ["phase", "step", "progress"] {
+            assert!(body.get(field).is_none(), "{field} once ready");
+        }
     }
 
     #[tokio::test]
@@ -576,7 +610,7 @@ mod tests {
         let (app, state) = app();
         state.set_state(LoadState::Loading {
             model: "qwen3-asr-0.6b".to_string(),
-            progress: 0.3,
+            report: Report::default(),
         });
         let (status, body) =
             call(app, post("/v1/load", &json!({ "name": "qwen3-asr-0.6b" }))).await;

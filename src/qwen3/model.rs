@@ -32,6 +32,8 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use burn::nn::{Embedding, EmbeddingConfig, Linear};
 use burn::prelude::*;
@@ -185,7 +187,8 @@ impl std::fmt::Debug for Qwen3Asr {
 
 impl Qwen3Asr {
     /// Loads a checkpoint from its safetensors files — one, or the shards the
-    /// 1.7B checkpoint is split into — casting the weights to `dtype`.
+    /// 1.7B checkpoint is split into — casting the weights to `dtype`. `read`
+    /// counts the checkpoint's bytes as they are read.
     ///
     /// # Errors
     /// If the configuration describes a model this port does not implement,
@@ -195,6 +198,7 @@ impl Qwen3Asr {
         weights: &[PathBuf],
         dtype: DType,
         device: &Device,
+        read: &Arc<AtomicU64>,
     ) -> Result<Self, String> {
         cfg.validate()?;
         let mut model = Model::init(cfg, device);
@@ -202,7 +206,9 @@ impl Qwen3Asr {
         for file in weights {
             let mut store = SafetensorsStore::from_file(file)
                 .with_from_adapter(
-                    crate::qwen3::CheckpointAdapter::for_device(device)
+                    crate::qwen3::ReadCounter(Arc::clone(read))
+                        .chain(crate::qwen3::CheckpointAdapter::for_device(device))
+                        .chain(crate::qwen3::HalfCast { target: dtype })
                         .chain(FloatCastAdapter::to(dtype)),
                 )
                 .remap(remapper()?)

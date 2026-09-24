@@ -6273,6 +6273,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
+ "buildid",
  "burn",
  "burn-store",
  "bytes",

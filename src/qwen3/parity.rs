@@ -27,6 +27,7 @@
 //! tokens, so every step's logits are compared even past a near-tie.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use burn::tensor::DType;
 use safetensors::{Dtype, SafeTensors};
@@ -179,8 +180,14 @@ fn layers_match_the_reference() {
             .unwrap();
     let device = crate::qwen3::test_device();
     let started = std::time::Instant::now();
-    let mut model = Qwen3Asr::load(&config, &weight_files(&model_dir), dtype, &device)
-        .expect("loading the weights");
+    let mut model = Qwen3Asr::load(
+        &config,
+        &weight_files(&model_dir),
+        dtype,
+        &device,
+        &Arc::default(),
+    )
+    .expect("loading the weights");
     model.set_full_attention(full_attention);
     eprintln!(
         "loaded {} on {device:?} in {dtype:?} in {:.1?}, against a {reference_dtype} reference \

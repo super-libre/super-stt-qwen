@@ -159,14 +159,19 @@ Vulkan computes in f16, never bf16. The SPIR-V extension for bf16 allows no
 arithmetic on it, yet CubeCL emits some, and NVIDIA's driver crashes compiling
 it. f16 is what the RTX 3090 computes fastest there: 0.19 s for the clip
 against 0.88 s in f32, and 0.89 s against 5.6 s for a 66-second one. A device
-that computes in neither half-width type gets f32. The shipped kernel bundle
-covers CUDA only, so a Vulkan build's first load compiles and tunes for about
-two minutes.
+that computes in neither half-width type gets f32.
 
 Metal computes in f16 too: every Metal GPU does so natively, and f16 is the
 half-width type measured on this model. The Metal and macOS builds are built
 and linted in CI, and the CPU one tested there, but no Metal run has been
 measured yet.
+
+ROCm computes in f16 as well, on every AMD card. CubeCL's HIP runtime compiles
+through its LLVM backend, which has no lowering for bf16, yet reports bf16
+supported, so every kernel using it fails to compile. The Voxtral backend met
+this on a gfx1013 and gets CUDA's transcripts word for word there in f16. This
+build has not been run on AMD hardware. A load whose warm-up cannot
+transcribe at all fails with `load_failed` rather than reporting `ready`.
 
 A clip of a length not seen before costs the same as one that was — 0.12 to
 0.31 s on a fresh process for clips of 5 to 18 seconds — because of the
@@ -196,8 +201,9 @@ streamed no previews.
 What this backend costs in exchange is GPU memory, which it holds from the load
 on rather than growing into: 4.2 GiB for the 0.6B model, where PyTorch went
 from 2.0 GiB to 4.3 GiB over the long clips, and 7.6 GiB for the 1.7B one,
-against PyTorch's 5.8 GiB at most. And a load without the kernel cache kept
-takes about a minute, against six or seven seconds for `transformers`.
+against PyTorch's 5.8 GiB at most. And the first load of a model builds its
+kernels, which takes about six minutes on CUDA and two on Vulkan, against six or
+seven seconds for `transformers`; loads after it take four to nine seconds.
 
 On the CPU, the 0.6B model and the eleven-second clip: 4.9 s here, 4.2 to
 5.1 s for the Python backend in bf16 as it shipped, and 3.1 to 3.5 s for
@@ -217,37 +223,41 @@ language named, and throws the text away, which walks the encoder, the prefill
 and the captured decode step at the shapes real requests use. `ready` then
 means ready.
 
-Against an empty cache that warm-up takes about five minutes on an RTX 3090,
-most of it tuning. The release tarballs ship `kernels/autotune.bundle`, the
-tuning results for both models, imported at startup, which brings a fresh
-machine to `ready` in about a minute — what is left is compiling; see
-[Shipping a warm cache](#shipping-a-warm-cache).
+That warm-up compiles and tunes every kernel the first time a model loads with
+a build, which on an RTX 3090 takes about six minutes on CUDA (361 s for the
+0.6B model, 375 s for the 1.7B) and under two on Vulkan (107 s and 112 s).
+Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
+GPU and driver.
 
-Compiled kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable
-directory the daemon grants for keeping things between runs. The Super STT
-daemon does not grant one yet (Super TTS does); until it does, the backend
-keeps them in its private `/tmp`, which is writable but dies with the process,
-so every load takes that minute — while the bundle's tuning still applies. With
-the directory granted, a load after the first takes about five seconds.
+The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
+the daemon grants for keeping things between runs, so only that first load
+pays: a load after it takes 4 to 6 seconds on CUDA and 5 to 9 on Vulkan. Without the directory granted,
+the backend keeps them in its private `/tmp`, which dies with the process, and
+every load is a first load.
 
-### Shipping a warm cache
+### Load progress
 
-The bundle is produced by running the exporter on the hardware it is for,
-against an empty cache, once per model:
+While a load runs, `GET /v1/status` says what it is doing, for the app to show:
 
-```sh
-SUPER_STT_BACKEND_DIR=target/test-backend \
-SUPER_STT_BACKEND_CACHE_DIR=$(mktemp -d) \
-  ./super-stt-backend-qwen export-kernels \
-      --warm qwen3-asr-0.6b kernels/autotune.bundle "RTX 3090 Linux"
-```
+- `phase`: `initial_setup` on the first load of a model with this build, when
+  the kernels are built; `loading` after. A marker in the cache directory,
+  named by model, accelerator and the binary's build ID — what CubeCL keys its
+  compiled kernels on, so any rebuild is a first load again — records a
+  warm-up that ran to the end, and clearing the cache also brings the setup
+  back. A CPU build compiles nothing and always reports `loading`.
+- `step`: `loading_weights`, then `building_kernels` on an initial setup or
+  `warming_up` after.
+- `progress`: how much of the step is done, below 1 until it ends. The
+  weights by the bytes of the checkpoint read. Building kernels by the entries
+  CubeCL writes to its cache, compiled kernels and tuning results both,
+  against how many a cold load wrote on an RTX 3090; past 90% of that
+  estimate it closes on 1 without reaching it, so a GPU that writes more slows
+  the bar rather than stopping it. Warming up by the warm-up's transcriptions
+  done.
 
-Importing is insert-only, and the exporter writes whatever the cache holds, so
-warming the second model with the first model's bundle in
-`$SUPER_STT_BACKEND_DIR/kernels/` yields a file covering both. Entries for a
-GPU a machine does not have are never looked up. The exporting binary must be
-the same build as the consuming one: the CubeCL version is part of every
-namespace.
+The daemon fails a load whose step and progress stand still for two minutes.
+On the cold loads above the longest such stretch was 6 s on CUDA and 10 s on
+Vulkan, both while building kernels.
 
 ## Building
 
@@ -297,9 +307,10 @@ making the directory installable with the daemon's import-from-directory path.
 
 | Path | What it holds |
 |---|---|
-| `src/main.rs` | Socket setup, the kernel cache, the `export-kernels` mode. |
+| `src/main.rs` | Socket setup and the kernel cache's location. |
 | `src/server.rs` | The `/v1` routes and the error codes the contract names. |
 | `src/model.rs` | Device and dtype selection, loading, the warm-up, a transcription end to end. |
+| `src/progress.rs` | What a load reports in `GET /v1/status` while it runs. |
 | `src/model_thread.rs` | The thread the model lives on, since its captured decode step is not `Send`. |
 | `src/qwen3/` | The model: feature extraction, encoder, decoder, the thinker joining them, and the parity check. |
 | `src/prompt.rs` | The tokenizer, the chat template, and reading the answer back. |
