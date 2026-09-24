@@ -21,7 +21,7 @@
     # install directory.
     contract = "v3"
     license = "GPL-3.0-only"
-    description = "Local Qwen3-ASR speech-to-text."
+    description = "Local Qwen3-ASR speech-to-text in Rust: CUDA, ROCm, Vulkan, Metal or CPU, with streamed previews."
 
 [network]
     # Required to be empty for subprocess backends; the transport has no network.
