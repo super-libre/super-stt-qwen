@@ -1,0 +1,7 @@
+# `doc_markdown` reads a CamelCase word in a doc comment as an unlinked item and
+# asks for backticks. These are not items — they are the names of the projects
+# this backend's documentation keeps comparing itself against. Backticking them
+# would make prose about a project read like prose about a type.
+#
+# The list extends clippy's own defaults rather than replacing them.
+doc-valid-idents = ["CubeCL", "PyTorch", "ROCm", ".."]

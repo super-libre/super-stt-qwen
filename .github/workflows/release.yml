@@ -1,0 +1,224 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }} ${{ matrix.suffix }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One build per (target, accelerator). CubeCL compiles kernels at
+          # runtime, so there is no compute-capability axis: what used to be
+          # twelve CUDA builds is two, one per CUDA major version.
+          #
+          # `features` is passed with `--no-default-features`, so each build
+          # carries exactly one backend rather than its own plus the default
+          # `flex`.
+
+          # CPU (x86_64) — the pure-Rust backend, which runs anywhere. Usable
+          # for the 0.6B model; expect the 1.7B one to be slow.
+          - {
+              target: x86_64-unknown-linux-gnu,
+              suffix: cpu,
+              features: flex,
+              image: "",
+              runner: ubuntu-latest,
+            }
+
+          # CUDA. Built inside the nvidia/cuda devel image (carries nvcc and
+          # the headers `cubecl-hip-sys`'s CUDA counterpart reads the version
+          # from) via cross's image override.
+          - {
+              target: x86_64-unknown-linux-gnu,
+              suffix: cuda12,
+              features: cuda,
+              image: "nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04",
+              runner: ubuntu-latest,
+            }
+          - {
+              target: x86_64-unknown-linux-gnu,
+              suffix: cuda13,
+              features: cuda,
+              image: "nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04",
+              runner: ubuntu-latest,
+            }
+
+          # ROCm. The image has to carry the ROCm version `cubecl-hip-sys`
+          # binds — 7.1 as pinned today — so this tag moves with that crate.
+          - {
+              target: x86_64-unknown-linux-gnu,
+              suffix: rocm,
+              features: rocm,
+              image: "rocm/dev-ubuntu-24.04:7.1.1",
+              runner: ubuntu-latest,
+            }
+
+          # Vulkan: no SDK needed to build, the loader is found at runtime.
+          - {
+              target: x86_64-unknown-linux-gnu,
+              suffix: vulkan,
+              features: vulkan,
+              image: "",
+              runner: ubuntu-latest,
+            }
+
+          # aarch64 Linux, cross-compiled: CPU, and Vulkan for the ARM boards
+          # and laptops whose GPU has a Vulkan driver (Mesa's Panfrost, Turnip
+          # and Asahi, among others). No CUDA or ROCm on ARM here.
+          - {
+              target: aarch64-unknown-linux-gnu,
+              suffix: cpu,
+              features: flex,
+              image: "",
+              runner: ubuntu-latest,
+            }
+          - {
+              target: aarch64-unknown-linux-gnu,
+              suffix: vulkan,
+              features: vulkan,
+              image: "",
+              runner: ubuntu-latest,
+            }
+
+          # macOS, built natively on an Apple Silicon runner with plain cargo:
+          # cross has no Apple images, and Xcode's SDK builds for both
+          # architectures. Metal is the GPU path on every Mac, Apple Silicon
+          # or an Intel one's AMD or Intel GPU; the CPU builds cover the rest.
+          - {
+              target: aarch64-apple-darwin,
+              suffix: metal,
+              features: metal,
+              image: "",
+              runner: macos-latest,
+            }
+          - {
+              target: aarch64-apple-darwin,
+              suffix: cpu,
+              features: flex,
+              image: "",
+              runner: macos-latest,
+            }
+          - {
+              target: x86_64-apple-darwin,
+              suffix: metal,
+              features: metal,
+              image: "",
+              runner: macos-latest,
+            }
+          - {
+              target: x86_64-apple-darwin,
+              suffix: cpu,
+              features: flex,
+              image: "",
+              runner: macos-latest,
+            }
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-${{ matrix.suffix }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cross
+        if: runner.os == 'Linux'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # The CUDA and ROCm builds run inside their vendor's devel image, which
+      # carries the toolkit headers those backends bind against, selected
+      # per-target via cross's image override. The other Linux builds use
+      # cross's default images, and the macOS ones plain cargo against the
+      # runner's Xcode SDK. No GPU is needed at build time and no compute
+      # capability is chosen: CubeCL compiles the kernels on the host that runs
+      # them.
+      - name: Build
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            build=cargo
+          else
+            build=cross
+            # cubecl-hip's tracel-llvm-bundler downloads LLVM at build time
+            # into $HOME/.cache and $HOME/.local/share, and a cross container's
+            # HOME is `/`, which the build cannot write. Give the container a
+            # HOME in the mounted target directory; the host's stays as it is,
+            # since cross itself runs there. LLVM is linked statically, so
+            # nothing downloaded is needed at runtime.
+            export CROSS_CONTAINER_OPTS="-e HOME=/target/cross-home"
+          fi
+          if [ -n "${{ matrix.image }}" ]; then
+            export CROSS_TARGET_X86_64_UNKNOWN_LINUX_GNU_IMAGE="${{ matrix.image }}"
+          fi
+          "$build" build --release --locked --target ${{ matrix.target }} \
+            --no-default-features --features "${{ matrix.features }}" \
+            --bin super-stt-backend-qwen
+
+      # `kernels/` rides along with the binary when the repository has one. It
+      # holds the pre-warmed autotune cache, which is the slow half of a first
+      # load. Every namespace in it carries a device fingerprint, so the entries
+      # a machine cannot use are never looked up: one file covers every GPU it
+      # was warmed on and costs the others nothing. Shipped in every tarball,
+      # including the CPU one, rather than matched per accelerator.
+      - name: Create tarball
+        run: |
+          extra=()
+          if [ -d "$GITHUB_WORKSPACE/kernels" ]; then
+            extra=(-C "$GITHUB_WORKSPACE" kernels)
+          fi
+          tar -czf "qwen3-asr-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" super-stt-backend-qwen \
+            "${extra[@]}"
+          ls -lh qwen3-asr-*.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qwen3-asr-${{ matrix.target }}-${{ matrix.suffix }}
+          path: qwen3-asr-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz
+
+  create-release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      # backend.toml must ship as a release asset named exactly `backend.toml`:
+      # the super-stt indexer hashes these bytes into the registry's `manifest`
+      # pin, and the daemon verifies the installed manifest against that hash
+      # (reviewed == pinned == installed). Without it, the indexer falls back to
+      # un-pinned repo-source indexing. Checkout brings the tag's backend.toml
+      # into the workspace — the build tarballs don't carry it.
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            backend.toml
+            artifacts/**/*.tar.gz
+          generate_release_notes: true

@@ -1,0 +1,229 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#:schema https://jorge-menjivar.github.io/super-stt/backend.schema.json
+# Qwen3-ASR (local, GPU) subprocess backend. See docs/protocol/backend/.
+#
+# Every file below is fetched by the daemon before the first `POST /v1/load`:
+# the backend runs with `PrivateNetwork=yes` and a read-only backend directory,
+# so it can neither download nor write a weight itself. Only the selected
+# model's files are fetched.
+
+[backend]
+    source = "github.com/super-libre/super-stt-qwen"
+    name = "Qwen3-ASR"
+    version = "0.2.0"
+    kind = "subprocess"
+    entrypoint = "super-stt-backend-qwen"
+    contract = "v1"
+    license = "GPL-3.0-only"
+    description = "Local Qwen3-ASR speech-to-text."
+
+[network]
+    # Required to be empty for subprocess backends; the transport has no network.
+    allowed_hosts = []
+
+# One entry per tarball `.github/workflows/release.yml` builds — the filenames
+# must match it exactly, since the indexer resolves them against the release's
+# assets and pins their hashes. The archives hold the binary at their root,
+# which is where `entrypoint` above says to find it.
+#
+# One build per (target, accelerator). There is no compute-capability axis:
+# Burn compiles every kernel at runtime through CubeCL — NVRTC on CUDA, hiprtc
+# on ROCm, SPIR-V on Vulkan, MSL on Metal — so one CUDA build serves every
+# NVIDIA generation the installed driver can compile for. What is left is the
+# CUDA major version, which decides the API the binary was built against.
+
+[[assets.subprocess]]
+    file = "qwen3-asr-x86_64-unknown-linux-gnu-cpu.tar.gz"
+    target = "x86_64-unknown-linux-gnu"
+    accel = "cpu"
+
+[[assets.subprocess]]
+    file = "qwen3-asr-x86_64-unknown-linux-gnu-cuda12.tar.gz"
+    target = "x86_64-unknown-linux-gnu"
+    accel = "cuda"
+    cuda_major = 12
+    # No `cuda_sm`: the kernels are compiled on the host by NVRTC, so this
+    # build matches any compute capability, which is what omitting it declares.
+
+[[assets.subprocess]]
+    file = "qwen3-asr-x86_64-unknown-linux-gnu-cuda13.tar.gz"
+    target = "x86_64-unknown-linux-gnu"
+    accel = "cuda"
+    cuda_major = 13
+
+# AMD. The kernels are compiled at runtime here too, so this list is not the
+# set of architectures the binary carries code for — it is the set the backend
+# is claimed to work on, which the schema requires to be explicit. RDNA2
+# through RDNA4 and the CDNA parts; a card outside it will usually work and is
+# simply not advertised.
+[[assets.subprocess]]
+    file = "qwen3-asr-x86_64-unknown-linux-gnu-rocm.tar.gz"
+    target = "x86_64-unknown-linux-gnu"
+    accel = "rocm"
+    gfx = [
+        "gfx90a",
+        "gfx942",
+        "gfx1030",
+        "gfx1100",
+        "gfx1101",
+        "gfx1102",
+        "gfx1200",
+        "gfx1201",
+    ]
+
+# The vendor-neutral GPU path: Intel, an AMD card on the Mesa driver, an NVIDIA
+# card without CUDA installed. Slower than the native backends, and ranked
+# below them by the daemon, but it is the only GPU some hosts have. The 1.2
+# floor matches the Qwen TTS backend's, built on the same CubeCL: its
+# reductions reach for subgroup operations that are core from 1.2.
+[[assets.subprocess]]
+    file = "qwen3-asr-x86_64-unknown-linux-gnu-vulkan.tar.gz"
+    target = "x86_64-unknown-linux-gnu"
+    accel = "vulkan"
+    vulkan_api = "1.2"
+
+[[assets.subprocess]]
+    file = "qwen3-asr-aarch64-unknown-linux-gnu-cpu.tar.gz"
+    target = "aarch64-unknown-linux-gnu"
+    accel = "cpu"
+
+[[assets.subprocess]]
+    file = "qwen3-asr-aarch64-unknown-linux-gnu-vulkan.tar.gz"
+    target = "aarch64-unknown-linux-gnu"
+    accel = "vulkan"
+    vulkan_api = "1.2"
+
+# macOS. Metal is the GPU path on every Mac, Apple Silicon or an Intel one's
+# AMD or Intel GPU, with the kernels compiled at runtime to the Metal Shading
+# Language.
+[[assets.subprocess]]
+    file = "qwen3-asr-aarch64-apple-darwin-metal.tar.gz"
+    target = "aarch64-apple-darwin"
+    accel = "metal"
+
+[[assets.subprocess]]
+    file = "qwen3-asr-aarch64-apple-darwin-cpu.tar.gz"
+    target = "aarch64-apple-darwin"
+    accel = "cpu"
+
+[[assets.subprocess]]
+    file = "qwen3-asr-x86_64-apple-darwin-metal.tar.gz"
+    target = "x86_64-apple-darwin"
+    accel = "metal"
+
+[[assets.subprocess]]
+    file = "qwen3-asr-x86_64-apple-darwin-cpu.tar.gz"
+    target = "x86_64-apple-darwin"
+    accel = "cpu"
+
+# `provider` is a compatibility field: this backend does not read it, and it
+# is declared only because the daemon echoes it on load to backends released
+# against the older identity scheme.
+#
+# `supported_languages` is the thirty languages the checkpoints name, as the
+# BCP-47 codes src/lang.rs maps to those names; a test there holds the two
+# lists together.
+
+[[models]]
+    name = "qwen3-asr-0.6b"
+    provider = "local_qwen3_asr"
+    multilingual = true
+    primary_language = "en"
+    supported_languages = [
+        "zh",
+        "en",
+        "yue",
+        "ar",
+        "de",
+        "fr",
+        "es",
+        "pt",
+        "id",
+        "it",
+        "ko",
+        "ru",
+        "th",
+        "vi",
+        "ja",
+        "tr",
+        "hi",
+        "ms",
+        "nl",
+        "sv",
+        "da",
+        "fi",
+        "pl",
+        "cs",
+        "fil",
+        "fa",
+        "el",
+        "hu",
+        "mk",
+        "ro",
+    ]
+    supported_devices = ["cpu", "gpu"]
+    # 1.9 GB of bf16 weights, plus the key/value cache and the kernels'
+    # scratch. Deliberately conservative: the daemon uses this to decide
+    # whether a GPU can hold the model at all.
+    estimated_vram_bytes = 2500000000
+    processing_interval_ms = 1000
+    files = [
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json", destination = "models/qwen3-asr-0.6b/config.json", sha256 = "76d3ae4601ce939830b2517f4a6cadb86cc51316c3900af6b020b051c21a478c" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/generation_config.json", destination = "models/qwen3-asr-0.6b/generation_config.json", sha256 = "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/tokenizer_config.json", destination = "models/qwen3-asr-0.6b/tokenizer_config.json", sha256 = "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/vocab.json", destination = "models/qwen3-asr-0.6b/vocab.json", sha256 = "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/merges.txt", destination = "models/qwen3-asr-0.6b/merges.txt", sha256 = "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/model.safetensors", destination = "models/qwen3-asr-0.6b/model.safetensors", sha256 = "79d6cbd4c98c7bbffe9db2edac07f56cd6637d0d5944b27f6c2b8353840323ea" },
+    ]
+
+[[models]]
+    name = "qwen3-asr-1.7b"
+    provider = "local_qwen3_asr"
+    multilingual = true
+    primary_language = "en"
+    supported_languages = [
+        "zh",
+        "en",
+        "yue",
+        "ar",
+        "de",
+        "fr",
+        "es",
+        "pt",
+        "id",
+        "it",
+        "ko",
+        "ru",
+        "th",
+        "vi",
+        "ja",
+        "tr",
+        "hi",
+        "ms",
+        "nl",
+        "sv",
+        "da",
+        "fi",
+        "pl",
+        "cs",
+        "fil",
+        "fa",
+        "el",
+        "hu",
+        "mk",
+        "ro",
+    ]
+    supported_devices = ["cpu", "gpu"]
+    # 4.7 GB of bf16 weights, with the same headroom.
+    estimated_vram_bytes = 6000000000
+    processing_interval_ms = 1500
+    files = [
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/config.json", destination = "models/qwen3-asr-1.7b/config.json", sha256 = "2e74a751548b8ad7d7526d29365ad8144c345d8b412b1152d25dc6698452712f" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/generation_config.json", destination = "models/qwen3-asr-1.7b/generation_config.json", sha256 = "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/tokenizer_config.json", destination = "models/qwen3-asr-1.7b/tokenizer_config.json", sha256 = "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/vocab.json", destination = "models/qwen3-asr-1.7b/vocab.json", sha256 = "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/merges.txt", destination = "models/qwen3-asr-1.7b/merges.txt", sha256 = "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/model.safetensors.index.json", destination = "models/qwen3-asr-1.7b/model.safetensors.index.json", sha256 = "f994739fe38e5210b9e3e8ce6c6307315e2ceac3cb630e7b7414d69dce520f60" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/model-00001-of-00002.safetensors", destination = "models/qwen3-asr-1.7b/model-00001-of-00002.safetensors", sha256 = "a4cd1f1a04d90b757dc7f7dd26254e69a013b19e80efe590a83c6a3bde8608d6" },
+        { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/model-00002-of-00002.safetensors", destination = "models/qwen3-asr-1.7b/model-00002-of-00002.safetensors", sha256 = "6e0b9d9e09e2e0238e7ef3cc8a484ab387e91b90f1900bedf88bc92d7929ccfc" },
+    ]

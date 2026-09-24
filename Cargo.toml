@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Standalone Qwen3-ASR subprocess backend. Depends only on third-party crates —
+# no super-stt code. Excluded from any parent workspace (own Cargo.lock).
+
+[package]
+    name = "super-stt-backend-qwen"
+    version = "0.2.0"
+    edition = "2024"
+    description = "Qwen3-ASR speech-to-text backend for Super STT."
+    repository = "https://github.com/super-libre/super-stt-qwen"
+    license = "GPL-3.0-only"
+    publish = false
+
+# Own workspace root — never absorbed into a parent workspace.
+[workspace]
+
+
+[[bin]]
+    name = "super-stt-backend-qwen"
+    path = "src/main.rs"
+
+[dependencies]
+    anyhow = "1"
+    axum = { version = "0.8", default-features = false, features = ["json", "tokio"] }
+    # The model in `src/qwen3` is written against Burn, pinned by revision to the
+    # same fork and commit as the Qwen TTS backend and the Voxtral one: upstream
+    # Burn is missing fixes to its fusion crates that the fork carries, and
+    # `burn` has no stability guarantee between revisions anyway.
+    #
+    # Burn is what buys this backend ROCm and Vulkan, which PyTorch wheels could
+    # not ship in one bundle — CubeCL compiles every kernel at runtime for
+    # whatever device it finds, which is also why one build per target covers
+    # every GPU generation instead of one per CUDA compute capability.
+    burn = {
+        git = "https://github.com/jorge-menjivar/burn.git",
+        rev = "1e9de733d6ff94f34c34a5765ea0b4926478f989",
+        features = ["default", "cubecl"]
+    }
+    burn-store = {
+        git = "https://github.com/jorge-menjivar/burn.git",
+        rev = "1e9de733d6ff94f34c34a5765ea0b4926478f989",
+        features = ["std", "safetensors"]
+    }
+    bytes = "1"
+    env_logger = "0.11"
+    hyper = { version = "1", features = ["http1", "server"] }
+    hyper-util = { version = "0.1", features = ["server", "service", "tokio"] }
+    log = "0.4"
+    # The short-time Fourier transform of the log-mel front-end. The window is
+    # 400 samples, not a power of two, which is the case a plain radix-2
+    # transform does not cover and a mixed-radix planner does.
+    rustfft = "6"
+    serde = { version = "1", features = ["derive"] }
+    serde_json = "1"
+    # Builds the Qwen2 byte-level BPE tokenizer from the `vocab.json` and
+    # `merges.txt` the checkpoints ship (they ship no assembled
+    # `tokenizer.json`). `fancy-regex` rather than the `onig` default: Qwen's
+    # pre-tokenizer pattern needs a lookahead, which the plain `regex` crate
+    # omits, and `fancy-regex` supplies it in Rust where `onig` would pull in a
+    # C library.
+    tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+    tokio = {
+        version = "1",
+        features = ["macros", "net", "rt-multi-thread", "signal", "sync"]
+    }
+    tokio-stream = "0.1"
+
+[dev-dependencies]
+    # Reads the reference's layer dump in the parity test.
+    safetensors = "0.7"
+    # `tokio::time::sleep` in the load-failure test.
+    tokio = { version = "1", features = ["time"] }
+    # `ServiceExt::oneshot` for in-process router tests.
+    tower = { version = "0.5", features = ["util"] }
+
+# One accelerator per build, as the asset it ships in declares. `flex` is the
+# default because it is the one that runs anywhere: a pure-Rust CPU backend
+# with nothing to detect and no driver to find.
+[features]
+    default = ["flex"]
+    cpu = ["burn/cpu"]
+    cuda = ["burn/cuda"]
+    flex = ["burn/flex"]
+    metal = ["burn/metal"]
+    rocm = ["burn/rocm"]
+    vulkan = ["burn/vulkan"]
+    wgpu = ["burn/wgpu"]
+
+[lints.clippy]
+    pedantic = "warn"
+
+
+# The CubeCL the Burn fork's `qwen3-tts` branch builds against: the pinned
+# upstream revision plus its `compilation-cache-default` branch. A `[patch]` in
+# Burn's own manifest does not reach a build that merely depends on Burn —
+# patches come from the root of the crate being built — so this backend has to
+# repeat it, or it would build a different CubeCL than the fork was measured
+# on. It keeps compiled kernels across runs by default, coalesces the sliced
+# memory pool's free slices lazily, and lets the channel server take a partial
+# batch when its producer pauses.
+[patch."https://github.com/tracel-ai/cubecl"]
+    cubecl = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
+    cubecl-common = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
+    cubecl-environment = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
+    cubecl-ir = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
+    cubecl-zspace = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }

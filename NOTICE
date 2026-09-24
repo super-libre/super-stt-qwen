@@ -1,0 +1,66 @@
+Super STT — Qwen3-ASR backend
+Copyright (C) 2026 Jorge Menjivar <jorge@menjivar.ai>
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+This backend derives from the third-party work below. Nothing in this list is
+redistributed in this repository or in its release archives: the inference
+framework is compiled in from a pinned dependency, and the weights are
+downloaded by the Super STT daemon on the user's machine.
+
+
+## qwen-asr — Apache-2.0
+
+Copyright (c) 2026 Alibaba Qwen Team. https://pypi.org/project/qwen-asr/
+
+The model this backend implements. `src/qwen3` is a port to Burn of the
+package's `transformers` implementation
+(`qwen_asr/core/transformers_backend/modeling_qwen3_asr.py`, version 0.0.6):
+the audio encoder, the thinker's text decoder and the splicing of one into the
+other. `src/prompt.rs` follows its chat template and its output parsing
+(`parse_asr_output`, `detect_and_fix_repetitions`), and `src/audio.rs` its
+audio normalization and long-recording split (`normalize_audio_input`,
+`split_audio_into_chunks`). This backend ran that package, through PyTorch,
+before the port, and `scripts/parity_dump.py` runs it still, as the reference
+the port is measured against.
+
+
+## Burn — MIT / Apache-2.0
+
+Copyright (c) 2022 Burn contributors. https://github.com/tracel-ai/burn
+
+The inference framework, pinned to https://github.com/jorge-menjivar/burn at
+revision 9cd83cc49275b12a9ed982e6be921d15f693b24e. The decoder stack in
+`src/qwen3/transformer.rs`, the checkpoint adapter in `src/qwen3/mod.rs` and
+the model thread in `src/model_thread.rs` are adapted from that revision's
+`examples/qwen3-tts`, by way of the Super TTS Qwen TTS backend.
+
+
+## transformers — Apache-2.0
+
+Copyright (c) 2018 The Hugging Face team. https://github.com/huggingface/transformers
+
+`src/qwen3/audio.rs` computes the log-mel features the way `transformers`'
+`WhisperFeatureExtractor` does, and builds its Slaney mel filter bank the way
+`transformers.audio_utils.mel_filter_bank` does. `src/prompt.rs` assembles the
+Qwen2 tokenizer the way its `Qwen2Converter` does.
+
+
+## Fetched at runtime, not redistributed here
+
+These are downloaded by the Super STT daemon on the user's machine before first
+use, under their own terms; no part of them is contained in this repository or
+its release archives.
+
+  * The Qwen3-ASR checkpoints this version serves — `Qwen3-ASR-0.6B` and
+    `Qwen3-ASR-1.7B` — from https://huggingface.co/Qwen. Apache-2.0.
+    Copyright Alibaba Cloud, Qwen team.
+
+
+## Test fixture
+
+`tests/data/jfk.wav` is an excerpt of John F. Kennedy's 1961 inaugural
+address, a work of the United States government and in the public domain.
