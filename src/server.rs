@@ -740,4 +740,124 @@ mod tests {
             "event: done\ndata: {\"transcription\":\"hi \\\"there\\\"\"}\n\n"
         );
     }
+
+    use crate::fixture::{self, Layout};
+
+    /// A router over a backend directory holding the fixture, loaded.
+    async fn loaded(backend: &fixture::Backend) -> (axum::Router, Arc<AppState>) {
+        let state = Arc::new(AppState::new(backend.dir.clone()));
+        let app = router(Arc::clone(&state));
+        let (status, _) = call(
+            app.clone(),
+            post("/v1/load", &json!({ "name": fixture::MODEL })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let body = settled(&app).await;
+        assert_eq!(body["state"], "ready", "{body}");
+        assert_eq!(body["model"]["name"], fixture::MODEL);
+        (app, state)
+    }
+
+    /// `seconds` of a tone at `rate`, as a request carries it.
+    fn tone(seconds: f32, rate: u32) -> Vec<f32> {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let len = (seconds * rate as f32) as usize;
+        #[allow(clippy::cast_precision_loss)]
+        (0..len).map(|i| (i as f32 * 0.03).sin() * 0.3).collect()
+    }
+
+    #[tokio::test]
+    async fn a_loaded_model_transcribes_whatever_the_sample_rate() {
+        let backend = fixture::backend(Layout::Single);
+        let (app, state) = loaded(&backend).await;
+        for rate in [16_000, 48_000] {
+            let body =
+                json!({ "audio_data": tone(2.0, rate), "sample_rate": rate, "language": "en" });
+            let (status, body) = call(app.clone(), post("/v1/transcribe", &body)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["status"], "success");
+            assert!(body["transcription"].is_string(), "{body}");
+        }
+        assert!(!state.busy.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_zero_sample_rate_is_invalid() {
+        let (app, state) = app();
+        ready(&state);
+        let body = json!({ "audio_data": [0.1], "sample_rate": 0 });
+        let (status, body) = call(app, post("/v1/transcribe", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], "invalid_audio");
+    }
+
+    /// The frames of a streamed transcription, read as they come; `after_first`
+    /// runs once the first has arrived.
+    async fn frames(
+        app: axum::Router,
+        body: &Value,
+        after_first: impl FnOnce(),
+    ) -> Vec<(String, Value)> {
+        use tokio_stream::StreamExt;
+        let res = app.oneshot(post("/v1/transcribe", body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let mut stream = res.into_body().into_data_stream();
+        let mut text = String::new();
+        let mut after_first = Some(after_first);
+        while let Some(chunk) = stream.next().await {
+            text.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+            if let Some(f) = after_first.take() {
+                f();
+            }
+        }
+        text.split_terminator("\n\n")
+            .map(|frame| {
+                let (event, data) = frame.split_once('\n').unwrap();
+                let event = event.strip_prefix("event: ").unwrap().to_string();
+                let data = serde_json::from_str(data.strip_prefix("data: ").unwrap()).unwrap();
+                (event, data)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_streamed_transcription_previews_then_finishes() {
+        let backend = fixture::backend(Layout::Single);
+        let (app, _) = loaded(&backend).await;
+        let body = json!({
+            "audio_data": tone(3.0, 16_000),
+            "language": "en",
+            "options": { "stream_realtime": true },
+        });
+        let frames = frames(app, &body, || {}).await;
+        let (last, previews) = frames.split_last().unwrap();
+        assert_eq!(last.0, "done", "{frames:?}");
+        assert!(!previews.is_empty());
+        for (event, data) in previews {
+            assert_eq!(event, "preview");
+            assert!(data["text"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_stream_ends_with_an_error_frame() {
+        let backend = fixture::backend(Layout::Single);
+        let (app, state) = loaded(&backend).await;
+        let body = json!({
+            "audio_data": tone(30.0, 16_000),
+            "language": "en",
+            "options": { "stream_realtime": true },
+        });
+        let frames = frames(app, &body, || state.cancelled.store(true, Ordering::SeqCst)).await;
+        assert_eq!(
+            frames.last(),
+            Some(&("error".to_string(), json!({ "message": "cancelled" }))),
+            "{frames:?}"
+        );
+    }
 }
