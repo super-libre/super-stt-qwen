@@ -172,17 +172,20 @@ parity model="qwen3-asr-0.6b" dtype="f32" ref_dtype="float32" *args: parity-env 
 cross-build target="x86_64-unknown-linux-gnu":
     cross build --release --locked --target {{ target }}
 
-# --remap-path-prefix keeps report paths relative (src/...), and tests/ is
-# excluded so only product code is counted.
-#
+# --remap-path-prefix keeps report paths relative (src/...), and test code is
+# excluded so only product code is counted: tests/, and the parity harness,
+# which runs only against the reference dump `just parity` writes. CI's badge
+# step repeats this pattern.
+coverage_ignore := 'tests/|qwen3/parity\.rs'
+
 # Measure coverage, requires cargo-llvm-cov. Usage: just coverage [--html]
 coverage *args:
-    cargo llvm-cov --locked --remap-path-prefix --ignore-filename-regex 'tests/' {{ args }}
+    cargo llvm-cov --locked --remap-path-prefix --ignore-filename-regex '{{ coverage_ignore }}' {{ args }}
 
 # Coverage for CI: write lcov.info and print a summary.
 coverage-lcov:
-    cargo llvm-cov --locked --remap-path-prefix --ignore-filename-regex 'tests/' --lcov --output-path lcov.info
-    cargo llvm-cov report --summary-only --ignore-filename-regex 'tests/'
+    cargo llvm-cov --locked --remap-path-prefix --ignore-filename-regex '{{ coverage_ignore }}' --lcov --output-path lcov.info
+    cargo llvm-cov report --summary-only --ignore-filename-regex '{{ coverage_ignore }}'
 
 # No doctests: this is a binary-only crate, so `cargo test --doc` has no lib
 # target.
