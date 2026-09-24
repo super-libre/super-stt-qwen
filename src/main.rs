@@ -104,6 +104,11 @@ async fn serve(backend_dir: PathBuf) -> Result<()> {
     let socket_path = PathBuf::from(
         std::env::var(ENV_SOCKET).with_context(|| format!("{ENV_SOCKET} is not set"))?,
     );
+    // Before the socket exists: the daemon may send SIGTERM as soon as it
+    // sees it, and one that lands before the handler kills the process
+    // outright, leaving the socket behind.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("installing the SIGTERM handler")?;
     // The socket directory is the one path the sandbox leaves writable, and a
     // stale socket from a killed unit would make `bind` fail with EADDRINUSE.
     if let Some(parent) = socket_path.parent() {
@@ -120,8 +125,6 @@ async fn serve(backend_dir: PathBuf) -> Result<()> {
     );
 
     let app = server::router(Arc::new(server::AppState::new(backend_dir)));
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("installing the SIGTERM handler")?;
 
     loop {
         let (stream, _) = tokio::select! {
