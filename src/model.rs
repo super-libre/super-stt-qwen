@@ -168,8 +168,8 @@ const ON_GPU: bool = cfg!(any(
 /// A half-width type halves the weights and the bandwidth on a GPU. On the CPU
 /// it is slower than f32 rather than faster.
 ///
-/// bf16 is what the reference ran in and what CUDA and ROCm get, where the
-/// device computes in it. Never on Vulkan, whatever the device reports: the
+/// bf16 is what the reference ran in and what CUDA gets, where the device
+/// computes in it. Never on Vulkan, whatever the device reports: the
 /// SPIR-V extension for bf16 allows no arithmetic on it, yet CubeCL emits some,
 /// and NVIDIA's driver crashes compiling it. Vulkan gets f16 instead. It
 /// holds this model's activations, which peak near 1.1e4 in the 1.7B decoder,
@@ -182,8 +182,14 @@ const ON_GPU: bool = cfg!(any(
 /// arrived with Apple's M-series GPUs and a recent Metal, and CubeCL's bf16
 /// has only ever run here on CUDA. A device that computes in neither type gets
 /// f32.
+///
+/// So does ROCm. On RDNA1 (a gfx1013 under ROCm 7.2) CubeCL reports bf16
+/// supported, then fails every kernel that uses it: its compiler has no LLVM
+/// lowering for `cube.bf16`. The Voxtral backend, which met this, takes f16 on
+/// ROCm and gets CUDA's transcripts word for word there. Whether RDNA3 and CDNA
+/// fare better is untested.
 fn compute_dtype(device: &Device) -> DType {
-    let half = if matches!(BUILT_FOR, "vulkan" | "metal") {
+    let half = if matches!(BUILT_FOR, "vulkan" | "metal" | "rocm") {
         DType::F16
     } else {
         DType::BF16
@@ -613,13 +619,13 @@ impl QwenAsr {
         };
         let entries = crate::progress::cache_entries();
         tracker.enter(measure.0, measure.1);
-        let warmed = model.warm_up(&runs);
+        let warmed = model.warm_up(&runs).map_err(LoadError::Failed);
         // What `expected_cache_entries` is calibrated against, on a cold load.
         log::info!(
             "the warm-up wrote {} kernel-cache entries",
             crate::progress::cache_entries().saturating_sub(entries)
         );
-        Ok((model, warmed))
+        Ok((model, warmed?))
     }
 
     /// The device the model is actually running on, as `GET /v1/status`
@@ -637,13 +643,16 @@ impl QwenAsr {
     /// `GET /v1/status` has already said `ready`. See [`WARM_UP_SECONDS`] for
     /// why the clips are several lengths rather than one.
     ///
-    /// A failure here is logged and swallowed: the model is loaded and usable,
-    /// and refusing the load over a warm-up would turn a slow first request
-    /// into no service at all.
+    /// A failure after the first run is logged and swallowed: the model
+    /// transcribes, and refusing the load over a longer clip would turn a slow
+    /// first request into no service at all. A failure on the first run fails
+    /// the load, because then nothing transcribes — a device that says it
+    /// computes in a type its compiler cannot lower fails every kernel, and a
+    /// load that reported `ready` would fail every request after it.
     ///
     /// Counts each run into `runs` as it ends, and returns whether all
     /// [`warm_up_runs`] of them did.
-    fn warm_up(&mut self, runs: &AtomicU64) -> bool {
+    fn warm_up(&mut self, runs: &AtomicU64) -> Result<bool> {
         let ladder = warm_up_ladder();
         let started = std::time::Instant::now();
         for &seconds in ladder {
@@ -659,16 +668,17 @@ impl QwenAsr {
                     tokens <= WARM_UP_TOKENS
                 };
                 let result = catching(|| self.transcribe(&samples, language, keep_going, |_| {}));
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => {
-                        log::warn!("the warm-up failed at {seconds}s: {e:#}");
-                        return false;
+                let error = match result {
+                    Ok(Ok(_)) => None,
+                    Ok(Err(e)) => Some(format!("{e:#}")),
+                    Err(panic) => Some(format!("panicked: {panic}")),
+                };
+                if let Some(error) = error {
+                    if runs.load(Ordering::Relaxed) == 0 {
+                        anyhow::bail!("the model cannot transcribe: {error}");
                     }
-                    Err(panic) => {
-                        log::warn!("the warm-up panicked at {seconds}s: {panic}");
-                        return false;
-                    }
+                    log::warn!("the warm-up failed at {seconds}s: {error}");
+                    return Ok(false);
                 }
                 runs.fetch_add(1, Ordering::Relaxed);
             }
@@ -678,7 +688,7 @@ impl QwenAsr {
             ladder.len(),
             started.elapsed()
         );
-        true
+        Ok(true)
     }
 
     fn encode(&self, text: &str) -> Result<Vec<u32>> {

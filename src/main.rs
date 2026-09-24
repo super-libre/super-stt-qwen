@@ -64,7 +64,14 @@ fn cache_dir() -> PathBuf {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // CubeCL's ROCm compiler goes through pliron, which logs its whole IR
+    // after every pass at `info`: a cold ROCm load under the daemon's
+    // `RUST_LOG=info` wrote 10 GB of log. `RUST_LOG` is parsed after this
+    // default, so `pliron=info` there still brings it back.
+    env_logger::Builder::new()
+        .filter_module("pliron", log::LevelFilter::Warn)
+        .parse_env(env_logger::Env::default().default_filter_or("info"))
+        .init();
 
     // Before anything touches a device: the kernel cache's location is frozen
     // the first time `CubeCL` reads its configuration, and the driver's own
