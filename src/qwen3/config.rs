@@ -259,6 +259,53 @@ mod tests {
     }
 
     #[test]
+    fn a_rope_scaling_without_a_type_is_the_default() {
+        let config = CONFIG_0_6B.replace(r#""rope_type": "default""#, r#""x": 1"#);
+        let config: Config = serde_json::from_str(&config).unwrap();
+        let scaling = config.thinker_config.text_config.rope_scaling.as_ref();
+        assert_eq!(scaling.unwrap().rope_type, "default");
+        config.validate().unwrap();
+    }
+
+    /// Every shape this port does not implement is refused, by name.
+    #[test]
+    fn shapes_out_of_reach_are_refused() {
+        for (from, to, named) in [
+            (
+                r#""output_dim": 1024"#,
+                r#""output_dim": 512"#,
+                "outputs 512",
+            ),
+            (
+                r#""n_window_infer": 800"#,
+                r#""n_window_infer": 750"#,
+                "750",
+            ),
+            (r#""n_window": 50"#, r#""n_window": 0"#, "0-frame"),
+            (
+                r#""scale_embedding": false"#,
+                r#""scale_embedding": true"#,
+                "scale_embedding",
+            ),
+            (
+                r#""encoder_attention_heads": 14"#,
+                r#""encoder_attention_heads": 5"#,
+                "5 encoder heads",
+            ),
+            (
+                r#""num_attention_heads": 16"#,
+                r#""num_attention_heads": 12"#,
+                "do not divide 12",
+            ),
+        ] {
+            assert!(CONFIG_0_6B.contains(from), "{from}");
+            let config: Config = serde_json::from_str(&CONFIG_0_6B.replace(from, to)).unwrap();
+            let err = config.validate().unwrap_err();
+            assert!(err.contains(named), "{to}: {err}");
+        }
+    }
+
+    #[test]
     fn the_end_of_text_ids_read_as_one_or_many() {
         let many: GenerationConfig =
             serde_json::from_str(r#"{"eos_token_id": [151643, 151645]}"#).unwrap();

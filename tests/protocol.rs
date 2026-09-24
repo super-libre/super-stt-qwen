@@ -12,15 +12,49 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// A running backend, killed if a test fails before stopping it.
+/// A running backend, stopped as the daemon stops one when the test is done
+/// with it.
 struct Backend {
     child: Child,
     socket: PathBuf,
     _dir: TempDir,
 }
 
+impl Backend {
+    /// `SIGTERM`, as the daemon sends, and the exit it causes.
+    fn terminate(&mut self) -> std::process::ExitStatus {
+        let status = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status()
+            .expect("running kill");
+        assert!(status.success());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(exit) = self.child.try_wait().unwrap() {
+                return exit;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "still running 10 s after SIGTERM"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 impl Drop for Backend {
+    /// A clean exit rather than a kill, which also lets a coverage build
+    /// write what the process ran. A process that ignores `SIGTERM` is killed.
     fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .status();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -53,12 +87,34 @@ fn rand_seed() -> u64 {
 }
 
 fn spawn() -> Backend {
+    spawn_with_cache(Cache::Granted)
+}
+
+/// The cache directory a backend is started with.
+#[derive(Clone, Copy)]
+enum Cache {
+    /// A writable one, as the daemon grants.
+    Granted,
+    /// None: an older daemon, which grants none.
+    Absent,
+    /// One that cannot be created.
+    Unwritable,
+}
+
+fn spawn_with_cache(cache: Cache) -> Backend {
     let dir = TempDir::new();
     let socket = dir.0.join("b.sock");
-    let child = Command::new(env!("CARGO_BIN_EXE_super-stt-backend-qwen"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_super-stt-backend-qwen"));
+    command
         .env("SUPER_STT_BACKEND_SOCKET", &socket)
         .env("SUPER_STT_BACKEND_DIR", dir.0.join("backend"))
-        .env("SUPER_STT_BACKEND_CACHE_DIR", dir.0.join("cache"))
+        .env_remove("SUPER_STT_BACKEND_CACHE_DIR");
+    match cache {
+        Cache::Granted => command.env("SUPER_STT_BACKEND_CACHE_DIR", dir.0.join("cache")),
+        Cache::Absent => &mut command,
+        Cache::Unwritable => command.env("SUPER_STT_BACKEND_CACHE_DIR", "/proc/qwen3-asr-cache"),
+    };
+    let child = command
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -171,22 +227,19 @@ fn a_load_without_weights_reports_load_failed() {
 #[test]
 fn exits_on_sigterm_and_removes_its_socket() {
     let mut backend = spawn();
-    let status = Command::new("kill")
-        .args(["-TERM", &backend.child.id().to_string()])
-        .status()
-        .expect("running kill");
-    assert!(status.success());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(exit) = backend.child.try_wait().unwrap() {
-            assert!(exit.success(), "exited with {exit}");
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "still running 10 s after SIGTERM"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let exit = backend.terminate();
+    assert!(exit.success(), "exited with {exit}");
     assert!(!backend.socket.exists(), "the socket was left behind");
+}
+
+/// Neither a daemon that grants no cache directory nor one that cannot be
+/// created stops the backend: it serves, and compiles its kernels again on
+/// every load.
+#[test]
+fn serves_without_a_usable_cache_directory() {
+    for cache in [Cache::Absent, Cache::Unwritable] {
+        let backend = spawn_with_cache(cache);
+        let (code, body) = request(&backend.socket, "GET", "/v1/ping", None);
+        assert_eq!(code, 200, "{body}");
+    }
 }
