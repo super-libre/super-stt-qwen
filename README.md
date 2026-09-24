@@ -241,9 +241,10 @@ While a load runs, `GET /v1/status` says what it is doing, for the app to show:
 
 - `phase`: `initial_setup` on the first load of a model with this build, when
   the kernels are built; `loading` after. A marker in the cache directory,
-  named by model, version and accelerator, records a warm-up that ran to the
-  end, so clearing the cache also brings the setup back. A CPU build compiles
-  nothing and always reports `loading`.
+  named by model, accelerator and the binary's build ID — what CubeCL keys its
+  compiled kernels on, so any rebuild is a first load again — records a
+  warm-up that ran to the end, and clearing the cache also brings the setup
+  back. A CPU build compiles nothing and always reports `loading`.
 - `step`: `loading_weights`, then `building_kernels` on an initial setup or
   `warming_up` after.
 - `progress`: how much of the step is done, below 1 until it ends. The
