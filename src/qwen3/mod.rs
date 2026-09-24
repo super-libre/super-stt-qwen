@@ -36,7 +36,10 @@ use burn::nn::{LinearConfig, LinearLayout};
 use burn::prelude::*;
 use burn::tensor::DType;
 use burn_store::burn_pack::Tensor as PackTensor;
-use burn_store::{ApplyResult, ModuleAdapter, ModuleContext, PyTorchToBurnAdapter};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use burn_store::{ApplyResult, ModuleAdapter, ModuleContext, PyTorchToBurnAdapter, bridge};
 
 /// Intermediate outputs, recorded by name for the layer-by-layer comparison
 /// with the reference (see `parity`).
@@ -152,6 +155,30 @@ fn is_flex(device: &Device) -> bool {
 #[cfg(not(feature = "flex"))]
 fn is_flex(_: &Device) -> bool {
     false
+}
+
+/// Counts the checkpoint's bytes into `read` as each tensor's are drawn, which
+/// is how far a load has got. First in the chain, so it counts what the file
+/// holds rather than what a cast turns it into.
+///
+/// Adapted from the Voxtral backend's adapter of the same name.
+#[derive(Debug, Clone)]
+pub(crate) struct ReadCounter(pub Arc<AtomicU64>);
+
+impl ModuleAdapter for ReadCounter {
+    fn adapt(&self, tensor: PackTensor, _ctx: ModuleContext<'_>) -> PackTensor {
+        let read = Arc::clone(&self.0);
+        let bytes = tensor.byte_len() as u64;
+        let (name, dtype, shape) = (tensor.name.clone(), tensor.dtype, tensor.shape.clone());
+        bridge::map_data(tensor, name, dtype, shape, move |data| {
+            read.fetch_add(bytes, Ordering::Relaxed);
+            data
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn ModuleAdapter> {
+        Box::new(self.clone())
+    }
 }
 
 /// Loads the PyTorch checkpoints into modules built with [`linear_config`].

@@ -174,21 +174,13 @@ jobs:
             --no-default-features --features "${{ matrix.features }}" \
             --bin super-stt-backend-qwen
 
-      # `kernels/` rides along with the binary when the repository has one. It
-      # holds the pre-warmed autotune cache, which is the slow half of a first
-      # load. Every namespace in it carries a device fingerprint, so the entries
-      # a machine cannot use are never looked up: one file covers every GPU it
-      # was warmed on and costs the others nothing. Shipped in every tarball,
-      # including the CPU one, rather than matched per accelerator.
+      # The binary alone. No kernels ship with it: a GPU build compiles and
+      # tunes its own on its first load, which reports that as its
+      # `initial_setup` phase.
       - name: Create tarball
         run: |
-          extra=()
-          if [ -d "$GITHUB_WORKSPACE/kernels" ]; then
-            extra=(-C "$GITHUB_WORKSPACE" kernels)
-          fi
           tar -czf "qwen3-asr-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" super-stt-backend-qwen \
-            "${extra[@]}"
+            -C "target/${{ matrix.target }}/release" super-stt-backend-qwen
           ls -lh qwen3-asr-*.tar.gz
 
       - uses: actions/upload-artifact@v7
