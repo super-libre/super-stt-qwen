@@ -8,7 +8,7 @@
 # model's files are fetched.
 
 [backend]
-    id = "app.super-stt.qwen3-asr"
+    id = "app.super-stt.qwen"
     source = "github.com/super-libre/super-stt-qwen"
     name = "Qwen3-ASR"
     version = "0.2.0"
