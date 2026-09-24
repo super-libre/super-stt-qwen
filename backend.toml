@@ -10,7 +10,7 @@
 [backend]
     id = "app.super-stt.qwen"
     source = "github.com/super-libre/super-stt-qwen"
-    name = "Qwen3-ASR"
+    name = "Qwen"
     version = "0.2.0"
     kind = "subprocess"
     entrypoint = "super-stt-backend-qwen"
