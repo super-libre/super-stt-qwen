@@ -34,7 +34,7 @@ pub mod transformer;
 
 use burn::nn::{LinearConfig, LinearLayout};
 use burn::prelude::*;
-use burn::tensor::DType;
+use burn::tensor::{DType, TensorData, bf16, f16};
 use burn_store::burn_pack::Tensor as PackTensor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -181,6 +181,59 @@ impl ModuleAdapter for ReadCounter {
     }
 }
 
+/// Casts the checkpoint's bf16 weights to f16 on every core, when f16 is what
+/// the model computes in: on Vulkan, Metal and ROCm.
+///
+/// burn-store's `FloatCastAdapter` converts one element at a time on one
+/// thread, which took 7 to 11 s of a warm 1.7B load on Vulkan, where this
+/// takes 4. The arithmetic is the same — through f32, rounding to nearest
+/// even — so the weights come out bit for bit as they did. Anything else is
+/// left to the `FloatCastAdapter` after it; its bf16 to f32 for the CPU build
+/// is already as fast as this.
+///
+/// Adapted from the Voxtral backend's adapter of the same name.
+#[derive(Debug, Clone)]
+pub(crate) struct HalfCast {
+    pub target: DType,
+}
+
+impl ModuleAdapter for HalfCast {
+    fn adapt(&self, tensor: PackTensor, _ctx: ModuleContext<'_>) -> PackTensor {
+        if self.target != DType::F16 || tensor.dtype != DType::BF16 {
+            return tensor;
+        }
+        let (name, shape) = (tensor.name.clone(), tensor.shape.clone());
+        bridge::map_data(tensor, name, DType::F16, shape, |data| bf16_to_f16(&data))
+    }
+
+    fn clone_box(&self) -> Box<dyn ModuleAdapter> {
+        Box::new(self.clone())
+    }
+}
+
+/// Below this many elements a tensor is converted on the calling thread.
+const PARALLEL_CAST_MIN: usize = 1 << 16;
+
+fn bf16_to_f16(data: &TensorData) -> TensorData {
+    let source = data.as_slice::<bf16>().expect("a bf16 tensor holds bf16");
+    let mut out = vec![f16::ZERO; source.len()];
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(source.len().div_ceil(PARALLEL_CAST_MIN))
+        .max(1);
+    let chunk = source.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (from, to) in source.chunks(chunk).zip(out.chunks_mut(chunk)) {
+            scope.spawn(move || {
+                for (value, cast) in from.iter().zip(to) {
+                    *cast = f16::from_f32(value.to_f32());
+                }
+            });
+        }
+    });
+    TensorData::new(out, data.shape.clone())
+}
+
 /// Loads the PyTorch checkpoints into modules built with [`linear_config`].
 ///
 /// Renames the parameters of the normalization layers — `weight` and `bias` in
@@ -303,4 +356,25 @@ pub(crate) fn check_shards(results: &[ApplyResult]) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) fn test_device() -> burn::prelude::Device {
     crate::model::select_device(None).0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every bf16 bit pattern, NaNs included, against Burn's own conversion.
+    #[test]
+    fn the_half_cast_matches_burns_bit_for_bit() {
+        let values: Vec<bf16> = (0..=u16::MAX).map(bf16::from_bits).collect();
+        let data = TensorData::new(values, [1 << 16]);
+        let bits = |d: &TensorData| -> Vec<u16> {
+            d.as_slice::<f16>()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        let burns = data.clone().convert_dtype(DType::F16);
+        assert_eq!(bits(&bf16_to_f16(&data)), bits(&burns));
+    }
 }

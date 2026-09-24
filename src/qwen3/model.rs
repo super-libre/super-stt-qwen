@@ -208,6 +208,7 @@ impl Qwen3Asr {
                 .with_from_adapter(
                     crate::qwen3::ReadCounter(Arc::clone(read))
                         .chain(crate::qwen3::CheckpointAdapter::for_device(device))
+                        .chain(crate::qwen3::HalfCast { target: dtype })
                         .chain(FloatCastAdapter::to(dtype)),
                 )
                 .remap(remapper()?)
