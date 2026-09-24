@@ -183,11 +183,10 @@ const ON_GPU: bool = cfg!(any(
 /// has only ever run here on CUDA. A device that computes in neither type gets
 /// f32.
 ///
-/// So does ROCm. On RDNA1 (a gfx1013 under ROCm 7.2) CubeCL reports bf16
-/// supported, then fails every kernel that uses it: its compiler has no LLVM
-/// lowering for `cube.bf16`. The Voxtral backend, which met this, takes f16 on
-/// ROCm and gets CUDA's transcripts word for word there. Whether RDNA3 and CDNA
-/// fare better is untested.
+/// So does ROCm, on every AMD card. CubeCL's HIP runtime compiles through its
+/// LLVM backend, which has no lowering for `cube.bf16`, yet reports bf16
+/// supported: every kernel using it fails to compile. The Voxtral backend met
+/// this on a gfx1013 and gets CUDA's transcripts word for word there in f16.
 fn compute_dtype(device: &Device) -> DType {
     let half = if matches!(BUILT_FOR, "vulkan" | "metal" | "rocm") {
         DType::F16

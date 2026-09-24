@@ -166,10 +166,11 @@ half-width type measured on this model. The Metal and macOS builds are built
 and linted in CI, and the CPU one tested there, but no Metal run has been
 measured yet.
 
-ROCm computes in f16 as well. On an RDNA1 card (gfx1013, ROCm 7.2) CubeCL
-reports bf16 supported and then fails to compile every kernel that uses it;
-the Voxtral backend met this and gets CUDA's transcripts word for word in f16
-there. This build has not been run on AMD hardware. A load whose warm-up cannot
+ROCm computes in f16 as well, on every AMD card. CubeCL's HIP runtime compiles
+through its LLVM backend, which has no lowering for bf16, yet reports bf16
+supported, so every kernel using it fails to compile. The Voxtral backend met
+this on a gfx1013 and gets CUDA's transcripts word for word there in f16. This
+build has not been run on AMD hardware. A load whose warm-up cannot
 transcribe at all fails with `load_failed` rather than reporting `ready`.
 
 A clip of a length not seen before costs the same as one that was — 0.12 to
