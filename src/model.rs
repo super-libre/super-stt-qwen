@@ -899,4 +899,219 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, Outcome::Stopped(String::new()));
     }
+
+    use crate::fixture::{self, Layout};
+    use crate::progress::{Phase, Step};
+
+    fn load_fixture(backend: &fixture::Backend) -> Result<QwenAsr, LoadError> {
+        QwenAsr::load(&backend.dir, fixture::MODEL, None, &|_| {})
+    }
+
+    #[test]
+    fn a_load_reports_each_step_and_ends_ready_to_transcribe() {
+        let backend = fixture::backend(Layout::Single);
+        let reports = std::sync::Mutex::new(Vec::new());
+        let model = QwenAsr::load(&backend.dir, fixture::MODEL, None, &|r| {
+            reports.lock().unwrap().push(r);
+        })
+        .unwrap();
+        assert_eq!(model.device_name(), BUILT_FOR);
+        assert!(format!("{model:?}").contains("QwenAsr"));
+        let reports = reports.into_inner().unwrap();
+        // A CPU build compiles nothing, so every load is a plain one; a GPU
+        // build with no cache directory to find a marker in builds kernels.
+        let (phase, warming) = if ON_GPU {
+            (Phase::InitialSetup, Step::BuildingKernels)
+        } else {
+            (Phase::Loading, Step::WarmingUp)
+        };
+        assert!(reports.iter().all(|r| r.phase == Some(phase)));
+        let steps: Vec<Step> = reports.iter().filter_map(|r| r.step).collect();
+        let first_warm = steps.iter().position(|s| *s == warming).unwrap();
+        assert!(
+            steps[..first_warm]
+                .iter()
+                .all(|s| *s == Step::LoadingWeights)
+        );
+        assert!(!steps[..first_warm].is_empty());
+        assert!(reports.iter().filter_map(|r| r.progress).all(|p| p < 1.0));
+    }
+
+    #[test]
+    fn a_sharded_checkpoint_loads() {
+        let backend = fixture::backend(Layout::Sharded);
+        load_fixture(&backend).unwrap();
+    }
+
+    #[test]
+    fn transcribes_previews_and_stops() {
+        let backend = fixture::backend(Layout::Single);
+        let mut model = load_fixture(&backend).unwrap();
+        let samples = warm_up_audio(3.0);
+        for language in [Language::Detect, Language::Forced("English")] {
+            let mut previews: Vec<String> = Vec::new();
+            let outcome = model
+                .transcribe(&samples, language, || true, |p| previews.push(p.into()))
+                .unwrap();
+            let Outcome::Finished(text) = outcome else {
+                panic!("{language:?} was not finished: {outcome:?}");
+            };
+            // Noise, but each preview extends the one before it.
+            for pair in previews.windows(2) {
+                assert_ne!(pair[0], pair[1]);
+            }
+            if let Some(last) = previews.last() {
+                assert!(!last.is_empty(), "{text:?}");
+            }
+        }
+        let mut tokens = 0;
+        let outcome = model
+            .transcribe(
+                &samples,
+                Language::Forced("English"),
+                || {
+                    tokens += 1;
+                    tokens <= 3
+                },
+                |_| {},
+            )
+            .unwrap();
+        assert!(matches!(outcome, Outcome::Stopped(_)), "{outcome:?}");
+    }
+
+    /// A load that fails says why, with `load_failed`.
+    fn load_error(backend: &fixture::Backend) -> String {
+        let err = load_fixture(backend).unwrap_err();
+        assert_eq!(err.reason(), "load_failed");
+        format!("{err:#}")
+    }
+
+    #[test]
+    fn a_tokenizer_that_disagrees_with_the_config_fails_the_load() {
+        let backend = fixture::backend(Layout::Single);
+        backend.edit_json("config.json", |c| {
+            c["thinker_config"]["audio_start_token_id"] = 262.into();
+        });
+        let err = load_error(&backend);
+        assert!(err.contains("<|audio_start|>"), "{err}");
+    }
+
+    #[test]
+    fn a_config_this_port_cannot_run_fails_the_load() {
+        let backend = fixture::backend(Layout::Single);
+        backend.edit_json("config.json", |c| {
+            c["thinker_config"]["audio_config"]["scale_embedding"] = true.into();
+        });
+        let err = load_error(&backend);
+        assert!(err.contains("scale_embedding"), "{err}");
+    }
+
+    #[test]
+    fn an_unreadable_config_fails_the_load() {
+        let backend = fixture::backend(Layout::Single);
+        std::fs::write(backend.model_dir().join("generation_config.json"), "{").unwrap();
+        let err = load_error(&backend);
+        assert!(err.contains("generation_config.json"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_shard_fails_the_load_by_name() {
+        let backend = fixture::backend(Layout::Sharded);
+        std::fs::remove_file(backend.model_dir().join("model-00002-of-00002.safetensors")).unwrap();
+        let err = load_error(&backend);
+        assert!(err.contains("model-00002-of-00002"), "{err}");
+    }
+
+    #[test]
+    fn an_index_without_a_weight_map_fails_the_load() {
+        let backend = fixture::backend(Layout::Sharded);
+        backend.edit_json("model.safetensors.index.json", |i| {
+            *i = serde_json::json!({ "metadata": {} });
+        });
+        let err = load_error(&backend);
+        assert!(err.contains("weight_map"), "{err}");
+    }
+
+    #[test]
+    fn a_checkpoint_missing_a_tensor_fails_the_load() {
+        let backend = fixture::backend(Layout::Sharded);
+        // Each shard alone is partial; without the second the first's gaps
+        // are nobody's.
+        backend.edit_json("model.safetensors.index.json", |i| {
+            let map = i["weight_map"].as_object_mut().unwrap();
+            map.retain(|_, file| file == "model-00001-of-00002.safetensors");
+        });
+        let err = load_error(&backend);
+        assert!(err.contains("not found in any shard"), "{err}");
+    }
+
+    #[test]
+    fn an_index_naming_no_shard_fails_the_load() {
+        let backend = fixture::backend(Layout::Sharded);
+        backend.edit_json("model.safetensors.index.json", |i| {
+            i["weight_map"] = serde_json::json!({});
+        });
+        let err = load_error(&backend);
+        assert!(err.contains("no shards"), "{err}");
+    }
+
+    #[test]
+    fn tensors_no_parameter_takes_fail_the_load() {
+        let backend = fixture::backend(Layout::Single);
+        // One decoder layer fewer than the checkpoint holds.
+        backend.edit_json("config.json", |c| {
+            c["thinker_config"]["text_config"]["num_hidden_layers"] = 1.into();
+        });
+        let err = load_error(&backend);
+        assert!(err.contains("belong to no parameter"), "{err}");
+    }
+
+    #[test]
+    fn a_tensor_of_the_wrong_shape_fails_the_load() {
+        let backend = fixture::backend(Layout::Single);
+        backend.edit_json("config.json", |c| {
+            c["thinker_config"]["text_config"]["vocab_size"] = 300.into();
+        });
+        let err = load_error(&backend);
+        assert!(err.contains("embed_tokens"), "{err}");
+    }
+
+    #[test]
+    fn a_request_for_another_accelerator_gets_this_builds() {
+        let (_, name) = select_device(Some("some-other-accelerator"));
+        assert_eq!(name, BUILT_FOR);
+        let (_, name) = select_device(Some(BUILT_FOR));
+        assert_eq!(name, BUILT_FOR);
+    }
+
+    #[test]
+    fn a_first_load_is_expected_to_write_the_measured_cache_entries() {
+        let small = expected_cache_entries("qwen3-asr-0.6b");
+        let large = expected_cache_entries("qwen3-asr-1.7b");
+        assert!(small > 0 && large > 0);
+    }
+
+    #[test]
+    fn load_errors_name_their_reason() {
+        let unavailable = LoadError::DeviceUnavailable("no driver".into());
+        assert_eq!(unavailable.reason(), "device_unavailable");
+        assert!(unavailable.to_string().contains("no driver"));
+        let failed = LoadError::from(anyhow!("broken"));
+        assert_eq!(failed.reason(), "load_failed");
+        assert!(failed.to_string().contains("broken"));
+    }
+
+    #[test]
+    fn a_panic_is_caught_with_its_message() {
+        assert_eq!(catching(|| 1), Ok(1));
+        assert_eq!(
+            catching(|| panic!("{}", String::from("owned"))),
+            Err::<(), _>("owned".into())
+        );
+        assert_eq!(catching(|| panic!("static")), Err::<(), _>("static".into()));
+        assert_eq!(
+            catching(|| std::panic::panic_any(7)),
+            Err::<(), _>("panicked".into())
+        );
+    }
 }

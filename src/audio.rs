@@ -305,4 +305,22 @@ pub(crate) mod tests {
         assert_eq!(pad_short(&[0.1; 10]).len(), 8_000);
         assert_eq!(pad_short(&vec![0.1; 9_000]).len(), 9_000);
     }
+
+    #[test]
+    fn resampling_nothing_or_to_the_same_rate_copies() {
+        assert!(resample(&[], 48_000, SAMPLE_RATE).is_empty());
+        assert_eq!(resample(&[0.5, -0.5], 0, SAMPLE_RATE), vec![0.5, -0.5]);
+        assert_eq!(
+            resample(&[0.5, -0.5], SAMPLE_RATE, SAMPLE_RATE),
+            vec![0.5, -0.5]
+        );
+    }
+
+    #[test]
+    fn the_fixture_reads_as_eleven_seconds_in_range() {
+        let samples =
+            read_wav(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/jfk.wav"));
+        assert_eq!(samples.len() / SAMPLE_RATE as usize, 11);
+        assert!(samples.iter().all(|s| (-1.0..1.0).contains(s)));
+    }
 }

@@ -283,4 +283,21 @@ mod tests {
         assert_eq!(reports[1].progress, Some(0.25));
         assert_eq!(reports.last().unwrap().progress, Some(0.75));
     }
+
+    #[test]
+    fn phases_and_steps_have_their_wire_names() {
+        assert_eq!(Phase::InitialSetup.as_str(), "initial_setup");
+        assert_eq!(Phase::Loading.as_str(), "loading");
+        assert_eq!(Step::LoadingWeights.as_str(), "loading_weights");
+        assert_eq!(Step::BuildingKernels.as_str(), "building_kernels");
+        assert_eq!(Step::WarmingUp.as_str(), "warming_up");
+    }
+
+    /// Counted from when the step begins, so nothing written yet is nothing
+    /// done.
+    #[test]
+    fn cache_entries_count_from_the_start_of_the_step() {
+        let measure = Measure::cache_entries(100);
+        assert!(measure.fraction() < 0.01);
+    }
 }

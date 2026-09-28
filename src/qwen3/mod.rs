@@ -377,4 +377,27 @@ mod tests {
         let burns = data.clone().convert_dtype(DType::F16);
         assert_eq!(bits(&bf16_to_f16(&data)), bits(&burns));
     }
+
+    /// The store asks for a norm's `gamma` and `beta`; the checkpoint has
+    /// them as `weight` and `bias`, and nothing else is renamed.
+    #[test]
+    fn norm_parameters_are_found_under_their_pytorch_names() {
+        let adapter = CheckpointAdapter { transpose: false };
+        let alternative =
+            |param: &str, module: &str| adapter.get_alternative_param_name(param, module);
+        assert_eq!(
+            alternative("gamma", "Struct:LayerNorm").as_deref(),
+            Some("weight")
+        );
+        assert_eq!(
+            alternative("beta", "Struct:LayerNorm").as_deref(),
+            Some("bias")
+        );
+        assert_eq!(
+            alternative("gamma", "Struct:RmsNorm").as_deref(),
+            Some("weight")
+        );
+        assert_eq!(alternative("running_mean", "Struct:BatchNorm"), None);
+        assert_eq!(alternative("weight", "Struct:Linear"), None);
+    }
 }

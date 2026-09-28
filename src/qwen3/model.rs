@@ -525,3 +525,164 @@ fn read_token(token: &Tensor<1, Int>) -> u32 {
         .expect("a token tensor holds one value");
     u32::try_from(value).expect("a token id is a vocabulary index")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::{self, Layout};
+    use crate::qwen3::audio::{MelFilters, frame_count, log_mel_spectrogram};
+
+    /// The fixture, loaded straight from its files in `dtype`, with `edit`
+    /// applied to its configuration first.
+    fn load(dtype: DType, edit: impl FnOnce(&mut serde_json::Value)) -> Qwen3Asr {
+        let backend = fixture::backend(Layout::Single);
+        let mut config = fixture::config();
+        edit(&mut config);
+        let config: Config = serde_json::from_value(config).unwrap();
+        let weights = [backend.model_dir().join("model.safetensors")];
+        let read = Arc::default();
+        let model = Qwen3Asr::load(
+            &config,
+            &weights,
+            dtype,
+            &crate::qwen3::test_device(),
+            &read,
+        )
+        .unwrap();
+        assert!(read.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        model
+    }
+
+    /// The spectrogram of `seconds` of a tone, and its frame count.
+    fn mel(seconds: f32) -> (Vec<f32>, usize) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let len = (seconds * 16_000.0) as usize;
+        #[allow(clippy::cast_precision_loss)]
+        let samples: Vec<f32> = (0..len).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
+        (
+            log_mel_spectrogram(&samples, &MelFilters::slaney(128)),
+            frame_count(len),
+        )
+    }
+
+    const PROMPT: Prompt<'static> = Prompt {
+        prefix: &[257, 115, fixture::AUDIO_START],
+        suffix: &[260, 258, 257, 97],
+    };
+
+    /// The captured decode, and a decode far enough to grow its caches past
+    /// the first window, choose the tokens a plain step-by-step decode does.
+    #[test]
+    fn the_captured_decode_matches_the_step_by_step_one() {
+        let mut model = load(DType::F32, |_| {});
+        let (mel, frames) = mel(2.0);
+        let mut taps = Taps::on();
+        let audio = model.encode_audio(&mel, frames, &mut taps);
+        assert_eq!(audio.dims()[0], model.audio_len(frames));
+        let recorded: Vec<String> = taps.into_records().into_iter().map(|t| t.name).collect();
+        for name in [
+            "enc.conv1",
+            "enc.conv_out",
+            "enc.layers.0",
+            "enc.ln_post",
+            "enc.proj2",
+        ] {
+            assert!(recorded.iter().any(|r| r == name), "{name}: {recorded:?}");
+        }
+
+        let steps = 300;
+        let mut seen = Vec::new();
+        let captured = model.generate(PROMPT, audio.clone(), steps, &[], |t| {
+            seen.push(t);
+            ControlFlow::Continue(())
+        });
+        assert_eq!(captured.len(), steps);
+        assert_eq!(seen, captured);
+        // Noise, but not one token over and over: the comparisons below
+        // would hold of that trivially.
+        let distinct: std::collections::HashSet<u32> = captured.iter().copied().collect();
+        assert!(distinct.len() > 10, "{captured:?}");
+        assert!(captured.iter().position(|&t| t == captured[5]).unwrap() > 0);
+        let mut taps = Taps::on();
+        let plain = model.generate_tapped(PROMPT, audio.clone(), steps, &[], None, &mut taps);
+        assert_eq!(plain[..steps], captured[..]);
+        assert!(taps.into_records().iter().any(|t| t.name == "logits.0"));
+        assert!(format!("{model:?}").contains("decode_capacity"));
+
+        // Teacher-forced on its own choices, a decode chooses them again.
+        let forced = model.generate_tapped(
+            PROMPT,
+            audio.clone(),
+            0,
+            &[],
+            Some(&captured[..10]),
+            &mut Taps::off(),
+        );
+        assert_eq!(forced[..], captured[..10]);
+
+        // An ending token ends it, and is not returned.
+        let eos = captured[5];
+        let first = captured.iter().position(|&t| t == eos).unwrap();
+        let ended = model.generate(PROMPT, audio.clone(), steps, &[eos], |_| {
+            ControlFlow::Continue(())
+        });
+        assert_eq!(ended[..], captured[..first]);
+        let ended = model.generate_tapped(PROMPT, audio, steps, &[eos], None, &mut Taps::off());
+        assert_eq!(ended[..], captured[..first]);
+    }
+
+    #[test]
+    fn a_break_ends_the_decode_after_that_token() {
+        let mut model = load(DType::F32, |_| {});
+        let (mel, frames) = mel(1.0);
+        let audio = model.encode_audio(&mel, frames, &mut Taps::off());
+        let mut count = 0;
+        let tokens = model.generate(PROMPT, audio, 50, &[], |_| {
+            count += 1;
+            if count == 3 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert_eq!(tokens.len(), 3);
+    }
+
+    /// Convolving a few chunks at a time, and attending over the whole clip
+    /// rather than eight-second windows, both run; the first changes nothing.
+    #[test]
+    fn the_encoder_runs_in_small_groups_and_with_full_attention() {
+        let (mel, frames) = mel(12.0);
+        let whole = load(DType::F32, |_| {});
+        let expected = whole.encode_audio(&mel, frames, &mut Taps::off());
+        let mut grouped = load(DType::F32, |c| {
+            c["thinker_config"]["audio_config"]["conv_chunksize"] = 3.into();
+        });
+        let actual = grouped.encode_audio(&mel, frames, &mut Taps::on());
+        expected
+            .clone()
+            .into_data()
+            .assert_approx_eq::<f32>(&actual.into_data(), burn::tensor::Tolerance::default());
+        grouped.set_full_attention(true);
+        let full = grouped.encode_audio(&mel, frames, &mut Taps::off());
+        assert_eq!(full.dims(), expected.dims());
+    }
+
+    /// In f16 the checkpoint's bf16 weights go through [`crate::qwen3::HalfCast`].
+    #[test]
+    fn a_checkpoint_loads_and_decodes_in_f16() {
+        let mut model = load(DType::F16, |_| {});
+        let (mel, frames) = mel(1.0);
+        let audio = model.encode_audio(&mel, frames, &mut Taps::off());
+        let tokens = model.generate(PROMPT, audio, 4, &[], |_| ControlFlow::Continue(()));
+        assert_eq!(tokens.len(), 4);
+    }
+
+    #[test]
+    fn windows_and_prefills_come_in_powers_of_two() {
+        assert_eq!(window_for(0), MIN_WINDOW);
+        assert_eq!(window_for(MIN_WINDOW), 2 * MIN_WINDOW);
+        assert_eq!(prefill_len(1), MIN_PREFILL);
+        assert_eq!(prefill_len(MIN_PREFILL + 1), 2 * MIN_PREFILL);
+    }
+}

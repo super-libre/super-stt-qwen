@@ -216,7 +216,8 @@ jobs:
       - name: Write coverage badge JSON
         run: |
           set -euo pipefail
-          pct=$(cargo llvm-cov report --json --summary-only --ignore-filename-regex 'tests/' \
+          # The pattern is the justfile's `coverage_ignore`.
+          pct=$(cargo llvm-cov report --json --summary-only --ignore-filename-regex 'tests/|qwen3/parity\.rs' \
             | jq -r '.data[0].totals.lines.percent')
           if   awk "BEGIN{exit !($pct>=90)}"; then color=brightgreen
           elif awk "BEGIN{exit !($pct>=75)}"; then color=green
