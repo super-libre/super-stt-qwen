@@ -50,10 +50,11 @@ impl EncoderAttention {
         }
     }
 
-    /// `xs` is (windows, frames, `d_model`); `mask` (windows, heads, frames,
-    /// frames) is `true` where a frame must not attend.
+    /// `xs` is (windows, frames, `d_model`); `bias` (windows, heads, frames,
+    /// frames), when there is one, is added to the attention scores: 0 where
+    /// a frame may attend, -inf where it must not (see [`key_bias`]).
     #[allow(clippy::many_single_char_names)]
-    fn forward(&self, xs: Tensor<3>, mask: &Tensor<4, Bool>) -> Tensor<3> {
+    fn forward(&self, xs: Tensor<3>, bias: Option<&Tensor<4>>) -> Tensor<3> {
         let [w, l, d] = xs.dims();
         let split = |xs: Tensor<3>| {
             xs.reshape([w, l, self.num_heads, self.head_dim])
@@ -67,7 +68,7 @@ impl EncoderAttention {
             softcap: None,
             is_causal: false,
         };
-        let out = attention(q, k, v, Some(mask.clone()), None, options)
+        let out = attention(q, k, v, None, bias.cloned(), options)
             .swap_dims(1, 2)
             .reshape([w, l, d]);
         self.out_proj.forward(out)
@@ -100,10 +101,10 @@ impl EncoderLayer {
         }
     }
 
-    fn forward(&self, xs: Tensor<3>, mask: &Tensor<4, Bool>) -> Tensor<3> {
+    fn forward(&self, xs: Tensor<3>, bias: Option<&Tensor<4>>) -> Tensor<3> {
         let hidden = self
             .self_attn
-            .forward(self.self_attn_layer_norm.forward(xs.clone()), mask);
+            .forward(self.self_attn_layer_norm.forward(xs.clone()), bias);
         let xs = xs + hidden;
         let hidden = self.final_layer_norm.forward(xs.clone());
         let hidden = self
@@ -302,14 +303,14 @@ impl AudioTower {
             (count, span) = (1, windows * window);
         }
         let mut xs = embedded.reshape([count, span, d_model]);
-        let mask = key_mask(count, span, len, self.encoder.heads(), device);
+        let attn_bias = key_bias(count, span, len, self.encoder.heads(), self.dtype, device);
         let real = |xs: &Tensor<3>| {
             xs.clone()
                 .reshape([count * span, d_model])
                 .narrow(0, 0, len)
         };
         for (i, layer) in encoder.layers.iter().enumerate() {
-            xs = layer.forward(xs, &mask);
+            xs = layer.forward(xs, Some(&attn_bias));
             if taps.is_on() {
                 taps.record_with(|| format!("enc.layers.{i}"), &real(&xs));
             }
@@ -393,24 +394,38 @@ impl AudioTower {
     }
 }
 
-/// The attention mask of `count` windows of `span` frames, of which the first
-/// `len` are audio: `true` on the keys a frame must not attend to, broadcast
-/// over `heads` and every query, (count, heads, span, span).
+/// The attention bias of `count` windows of `span` frames, of which the first
+/// `len` are audio: -inf on the keys a frame must not attend to and 0
+/// elsewhere, broadcast over `heads` and every query, (count, heads, span,
+/// span), in `dtype`.
 ///
 /// Only the window the audio ends in is masked. A window wholly of padding is
 /// left open — a query with every key masked has a softmax of nothing, which
 /// is NaN — and its frames are dropped anyway.
-fn key_mask(
+///
+/// A bias rather than a boolean mask: on ROCm, Burn's attention with a
+/// boolean mask is wrong whatever the mask holds — 0.3 to 3.9 off with every
+/// key open, on an AMD BC-250 — where a bias, and no mask, match the
+/// reference to 1e-6. With the bias the same, everywhere.
+fn key_bias(
     count: usize,
     span: usize,
     len: usize,
     heads: usize,
+    dtype: DType,
     device: &Device,
-) -> Tensor<4, Bool> {
-    let masked: Vec<bool> = (0..count * span)
-        .map(|at| at >= len && at / span * span < len)
+) -> Tensor<4> {
+    let bias: Vec<f32> = (0..count * span)
+        .map(|at| {
+            if at >= len && at / span * span < len {
+                f32::NEG_INFINITY
+            } else {
+                0.0
+            }
+        })
         .collect();
-    Tensor::<4, Bool>::from_data(TensorData::new(masked, [count, 1, 1, span]), device)
+    Tensor::<4>::from_data(TensorData::new(bias, [count, 1, 1, span]), device)
+        .cast(dtype)
         .expand([count, heads, span, span])
 }
 
@@ -551,18 +566,13 @@ mod tests {
         let len = output_len(cfg, frames);
         let hidden = embedded.reshape([chunks * per_chunk, d]).narrow(0, 0, len);
         let window = per_chunk * cfg.chunks_per_window();
-        let heads = tower.encoder.heads();
         let run = |xs: Tensor<3>| {
             let [w, l, _] = xs.dims();
-            let open = Tensor::<4, Bool>::from_data(
-                TensorData::new(vec![false; w * heads * l * l], [w, heads, l, l]),
-                device,
-            );
             let xs = tower
                 .encoder
                 .layers
                 .iter()
-                .fold(xs, |xs, layer| layer.forward(xs, &open));
+                .fold(xs, |xs, layer| layer.forward(xs, None));
             xs.reshape([w * l, d])
         };
         let (full, rest) = (len / window, len % window);
