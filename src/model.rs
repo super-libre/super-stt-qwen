@@ -285,12 +285,13 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
 }
 
 // What a cold warm-up wrote (see [`expected_cache_entries`]): CUDA and Vulkan
-// on an RTX 3090, ROCm on an AMD BC-250. Metal is taken to be Vulkan,
-// unmeasured.
+// on an RTX 3090, ROCm on an AMD BC-250, Metal on an Apple M2.
 const CUDA_ENTRIES_0_6B: u64 = 1480;
 const CUDA_ENTRIES_1_7B: u64 = 1423;
 const ROCM_ENTRIES_0_6B: u64 = 452;
 const ROCM_ENTRIES_1_7B: u64 = 449;
+const METAL_ENTRIES_0_6B: u64 = 138;
+const METAL_ENTRIES_1_7B: u64 = 144;
 const VULKAN_ENTRIES_0_6B: u64 = 521;
 const VULKAN_ENTRIES_1_7B: u64 = 527;
 
@@ -316,6 +317,12 @@ fn expected_cache_entries(model_name: &str) -> u64 {
             ROCM_ENTRIES_1_7B
         } else {
             ROCM_ENTRIES_0_6B
+        }
+    } else if BUILT_FOR == "metal" {
+        if large {
+            METAL_ENTRIES_1_7B
+        } else {
+            METAL_ENTRIES_0_6B
         }
     } else if large {
         VULKAN_ENTRIES_1_7B

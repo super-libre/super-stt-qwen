@@ -129,6 +129,8 @@ step's logits are compared.
 | 0.6B, ROCm f32 vs PyTorch f32             |   85 |       1.6e-5  |         30/30 |
 | 0.6B, ROCm f16 vs PyTorch f32             |   85 |       1.3e-1  |         30/30 |
 | 1.7B, ROCm f16 vs PyTorch f32             |   91 |       3.2e-2  |         30/30 |
+| 0.6B, Metal f16 vs PyTorch f32            |   85 |       1.6e-2  |         30/30 |
+| 1.7B, Metal f16 vs PyTorch f32            |   91 |       6.1e-3  |         30/30 |
 
 In f32 on the CPU the two are the same arithmetic in a different order. On a
 GPU the matmuls run on tensor cores at TF32, which puts every layer near 1e-3
@@ -138,7 +140,8 @@ f16 keeps three more bits of mantissa than bf16 in a narrower range, which this
 model's activations fit: they peak near 1.1e4, and f16's largest value is 6.5e4.
 ROCm's f16 on an RDNA1 card, the AMD BC-250 measured, lands where CUDA's bf16
 does rather than where Vulkan's f16 does — its f16 kernels lose precision from
-the second convolution on, where its f32 is as exact as the CPU's.
+the second convolution on, where its f32 is as exact as the CPU's. Metal's
+f16, on an Apple M2, lands a little closer than Vulkan's.
 
 Run it with `just parity [model] [f32|bf16|f16] [float32|bfloat16] [cargo args]`;
 it provisions the Python reference in `target/parity-venv` on first use.
@@ -147,8 +150,8 @@ it provisions the Python reference in `target/parity-venv` on first use.
 
 A GPU is not required, but the 0.6B model is the one to try without one.
 Measured through the socket, the eleven-second fixture clip, request JSON
-included, on an RTX 3090, for the ROCm build an AMD BC-250 and, for the CPU
-build, a Ryzen 9 5900X:
+included, on an RTX 3090, for the ROCm build an AMD BC-250, for the Metal
+build an Apple M2 with 8 GB and, for the CPU build, a Ryzen 9 5900X:
 
 | Build        | Model | Load, warm kernel cache | Transcription |
 | ------------ | ----- | ----------------------: | ------------: |
@@ -158,6 +161,7 @@ build, a Ryzen 9 5900X:
 | Vulkan (f16) | 1.7B  |                   9.9 s |        0.30 s |
 | ROCm (f16)   | 0.6B  |                    76 s |         2.4 s |
 | ROCm (f16)   | 1.7B  |                   134 s |         4.0 s |
+| Metal (f16)  | 0.6B  |                    22 s |        0.80 s |
 | CPU (f32)    | 0.6B  |                   8.1 s |         4.9 s |
 
 The CPU build has no kernel cache; its load is mapping the weights, transposing
@@ -171,9 +175,13 @@ against 0.88 s in f32, and 0.89 s against 5.6 s for a 66-second one. A device
 that computes in neither half-width type gets f32.
 
 Metal computes in f16 too: every Metal GPU does so natively, and f16 is the
-half-width type measured on this model. The Metal and macOS builds are built
-and linted in CI, and the CPU one tested there, but no Metal run has been
-measured yet.
+half-width type measured on this model. On an Apple M2 with 8 GB of memory
+every test passes and the fixture clip transcribes word for word: 0.80 s for
+the eleven-second clip and 7.5 s for a ninety-second one with the 0.6B model,
+which holds 4.4 GB. The 1.7B model holds 9.3 GB, more than that Mac has, so it
+runs from swap: it transcribes correctly, but its warm load took 14 minutes
+and the eleven-second clip six to seven. On Apple Silicon it wants a Mac with
+16 GB.
 
 ROCm computes in f16 as well, on every AMD card. CubeCL's HIP runtime compiles
 through its LLVM backend, which has no lowering for bf16, yet reports bf16
@@ -246,7 +254,8 @@ means ready.
 That warm-up compiles and tunes every kernel the first time a model loads with
 a build, which on an RTX 3090 takes about six minutes on CUDA (361 s for the
 0.6B model, 375 s for the 1.7B) and under two on Vulkan (107 s and 112 s), and
-on an AMD BC-250 about ten on ROCm (612 s and 681 s).
+on an AMD BC-250 about ten on ROCm (612 s and 681 s). On the M2 the 0.6B
+model's takes under three minutes (146 s).
 Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
 GPU and driver.
 
@@ -254,7 +263,8 @@ The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
 the daemon grants for keeping things between runs, so only that first load
 pays: a load after it takes 4 to 6 seconds on CUDA and 5 to 9 on Vulkan, and
 on the BC-250 74 and 132 s, most of it the warm-up's longer clips, which that
-GPU transcribes slowly. Without the directory granted,
+GPU transcribes slowly, and 22 s for the 0.6B model on the M2. Without the
+directory granted,
 the backend keeps them in its private `/tmp`, which dies with the process, and
 every load is a first load.
 
@@ -280,9 +290,11 @@ While a load runs, `GET /v1/status` says what it is doing, for the app to show:
 
 The daemon fails a load whose step and progress stand still for two minutes.
 On the cold loads above the longest such stretch was 6 s on CUDA, 10 s on
-Vulkan and 62 s on the BC-250's ROCm, all while building kernels: on the
-BC-250 a minute went by without a new entry in the cache, half the daemon's
-limit.
+Vulkan, 34 s on the M2's Metal and 62 s on the BC-250's ROCm, all while
+building kernels: on the BC-250 a minute went by without a new entry in the
+cache, half the daemon's limit. The 1.7B model on the 8 GB M2, running from
+swap, stood still for 113 s on its cold load and 117 s on a warm one, within
+seconds of the limit.
 
 ## Building
 
