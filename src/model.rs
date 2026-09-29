@@ -284,10 +284,13 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
     (Device::default(), BUILT_FOR)
 }
 
-// What a cold warm-up wrote on an RTX 3090 (see [`expected_cache_entries`]),
-// ROCm taken to be CUDA and Metal to be Vulkan, unmeasured.
+// What a cold warm-up wrote (see [`expected_cache_entries`]): CUDA and Vulkan
+// on an RTX 3090, ROCm on an AMD BC-250. Metal is taken to be Vulkan,
+// unmeasured.
 const CUDA_ENTRIES_0_6B: u64 = 1480;
 const CUDA_ENTRIES_1_7B: u64 = 1423;
+const ROCM_ENTRIES_0_6B: u64 = 452;
+const ROCM_ENTRIES_1_7B: u64 = 449;
 const VULKAN_ENTRIES_0_6B: u64 = 521;
 const VULKAN_ENTRIES_1_7B: u64 = 527;
 
@@ -302,11 +305,17 @@ static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// [`crate::progress`]).
 fn expected_cache_entries(model_name: &str) -> u64 {
     let large = model_name.ends_with("1.7b");
-    if cfg!(any(feature = "cuda", feature = "rocm")) {
+    if cfg!(feature = "cuda") {
         if large {
             CUDA_ENTRIES_1_7B
         } else {
             CUDA_ENTRIES_0_6B
+        }
+    } else if cfg!(feature = "rocm") {
+        if large {
+            ROCM_ENTRIES_1_7B
+        } else {
+            ROCM_ENTRIES_0_6B
         }
     } else if large {
         VULKAN_ENTRIES_1_7B
