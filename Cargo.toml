@@ -33,7 +33,7 @@
     # every GPU generation instead of one per CUDA compute capability.
     burn = {
         git = "https://github.com/jorge-menjivar/burn.git",
-        rev = "1e9de733d6ff94f34c34a5765ea0b4926478f989",
+        rev = "8b232ba04c4d8bb7e8922fd88135c39aadc6c956",
         features = ["default", "cubecl"]
     }
     # The binary's build ID, which CubeCL keys its compiled kernels on: the
@@ -42,7 +42,7 @@
     buildid = "1"
     burn-store = {
         git = "https://github.com/jorge-menjivar/burn.git",
-        rev = "1e9de733d6ff94f34c34a5765ea0b4926478f989",
+        rev = "8b232ba04c4d8bb7e8922fd88135c39aadc6c956",
         features = ["std", "safetensors"]
     }
     bytes = "1"
