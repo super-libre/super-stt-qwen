@@ -289,8 +289,8 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
 // unmeasured.
 const CUDA_ENTRIES_0_6B: u64 = 1480;
 const CUDA_ENTRIES_1_7B: u64 = 1423;
-const ROCM_ENTRIES_0_6B: u64 = 452;
-const ROCM_ENTRIES_1_7B: u64 = 449;
+const ROCM_ENTRIES_0_6B: u64 = 484;
+const ROCM_ENTRIES_1_7B: u64 = 482;
 const VULKAN_ENTRIES_0_6B: u64 = 521;
 const VULKAN_ENTRIES_1_7B: u64 = 527;
 
