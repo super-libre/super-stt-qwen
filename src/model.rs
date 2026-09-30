@@ -288,12 +288,12 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
 // What a cold warm-up wrote (see [`expected_cache_entries`]): CUDA and Vulkan
 // on an RTX 3090, ROCm on an AMD BC-250. Metal is taken to be Vulkan,
 // unmeasured.
-const CUDA_ENTRIES_0_6B: u64 = 2370;
-const CUDA_ENTRIES_1_7B: u64 = 2326;
+const CUDA_ENTRIES_0_6B: u64 = 2184;
+const CUDA_ENTRIES_1_7B: u64 = 2131;
 const ROCM_ENTRIES_0_6B: u64 = 914;
 const ROCM_ENTRIES_1_7B: u64 = 916;
-const VULKAN_ENTRIES_0_6B: u64 = 1067;
-const VULKAN_ENTRIES_1_7B: u64 = 1075;
+const VULKAN_ENTRIES_0_6B: u64 = 983;
+const VULKAN_ENTRIES_1_7B: u64 = 971;
 
 /// Where `CubeCL` keeps this backend's kernels, once [`configure_kernel_cache`]
 /// has said.

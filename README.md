@@ -220,13 +220,17 @@ what the captured step removes. Its first request after a load also took 1.2
 to 2.4 s, where this backend's warm-up leaves it at 0.16 to 0.27 s, and it
 streamed no previews.
 
-What this backend costs in exchange is GPU memory: 3.4 GiB after the load for
-the 0.6B model, 5.0 GiB at most over the long clips, where PyTorch went from
-2.0 GiB to 4.3 GiB, and 6.1 GiB growing to 7.9 GiB for the 1.7B one, against
-PyTorch's 4.6 GiB growing to 5.8 GiB. And the first load of a model builds its
-kernels, which takes seven to eight minutes on CUDA and two on Vulkan, against
-six or seven seconds for `transformers`; loads after it take four to seven
-seconds.
+GPU memory stays close to what it holds after the load: 2.5 GiB for the 0.6B
+model and 2.8 GiB at most over the long clips, where PyTorch went from 2.0 GiB
+to 4.3 GiB, and 5.1 GiB growing to 5.3 GiB for the 1.7B one, against PyTorch's
+4.6 GiB growing to 5.8 GiB. The weights live in exact-fit allocations of their
+own, and a long recording's encoder and prefill run a bounded piece at a time,
+so a ninety-second clip needs little more than an eleven-second one. What this
+backend costs in exchange is the first load of a model, which builds its
+kernels: six to seven minutes on CUDA and under two on Vulkan, against six or
+seven seconds for `transformers`, and while autotuning it briefly reaches
+5.2 GiB for the 0.6B model and 7.7 GiB for the 1.7B one on CUDA. Loads after it
+take four to seven seconds.
 
 On the CPU, the 0.6B model and the eleven-second clip: 4.9 s here, 4.2 to
 5.1 s for the Python backend in bf16 as it shipped, and 3.1 to 3.5 s for
@@ -247,9 +251,9 @@ and the captured decode step at the shapes real requests use. `ready` then
 means ready.
 
 That warm-up compiles and tunes every kernel the first time a model loads with
-a build, which on an RTX 3090 takes seven to eight minutes on CUDA (457 s for
-the 0.6B model, 460 s for the 1.7B) and about two on Vulkan (130 s and 136 s),
-and on an AMD BC-250 fourteen to fifteen on ROCm (840 s and 904 s).
+a build, which on an RTX 3090 takes six to seven minutes on CUDA (413 s for
+the 0.6B model, 367 to 417 s for the 1.7B) and under two on Vulkan (91 s and
+107 s), and on an AMD BC-250 fourteen to fifteen on ROCm (840 s and 904 s).
 Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
 GPU and driver.
 
