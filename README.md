@@ -299,9 +299,11 @@ Each build carries exactly one accelerator, which is why the recipes pass
 its own would keep the default CPU backend too.
 
 **Burn comes from a fork.** `Cargo.toml` pins `jorge-menjivar/burn` at
-`1e9de733` — the revision the Voxtral backend pins — which is upstream Burn
-plus fixes to its fusion crates, to reading a tensor back to the host and to
-freeing memory under fusion, and repeats the fork's CubeCL patch (`46f7861b`),
+`8b232ba0`, which is upstream Burn plus fixes to its fusion crates, to reading
+a tensor back to the host and to freeing memory under fusion, and a dense
+convolution done as a matmul over its unfolded columns, an autotune candidate
+for GPUs whose only other choice is the direct kernel. It repeats the fork's
+CubeCL patch (`46f7861b`),
 since a `[patch]` in a dependency does not reach the crate being built.
 
 ## Testing
