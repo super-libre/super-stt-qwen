@@ -3,8 +3,9 @@
 //! greedy decoding over the result.
 //!
 //! A transcription is one prompt — the chat template with one
-//! `<|audio_pad|>` per encoded audio frame — prefilled in a single pass, then
-//! decoded a token at a time until an end-of-text token. The placeholders are
+//! `<|audio_pad|>` per encoded audio frame — prefilled up to
+//! [`MAX_PREFILL_PIECE`] positions at a time, then decoded a token at a time
+//! until an end-of-text token. The placeholders are
 //! never embedded: the prompt is built as the embeddings of the text before
 //! them, the encoded audio, and the embeddings of the text after, which is
 //! what the reference's `masked_scatter` computes.
@@ -153,6 +154,14 @@ fn prefill_len(len: usize) -> usize {
     len.next_power_of_two().max(MIN_PREFILL)
 }
 
+/// The most positions the prefill runs at once; a longer prompt goes through
+/// in pieces at increasing offsets, which computes the same.
+///
+/// Only memory rides on it. The attention of 2048 positions at once, about
+/// ninety seconds of audio, took 1.7 GB of scratch on an RTX 3090 with the
+/// 1.7B model, where two pieces of 1024 took 0.1 GB and ran as fast.
+const MAX_PREFILL_PIECE: usize = 1024;
+
 /// A loaded Qwen3-ASR checkpoint.
 pub struct Qwen3Asr {
     audio: AudioTower,
@@ -201,6 +210,41 @@ impl Qwen3Asr {
         read: &Arc<AtomicU64>,
     ) -> Result<Self, String> {
         cfg.validate()?;
+        // The weights go to the persistent pool: exact-fit slices that live
+        // for the process. In the dynamic pools they would share pages with
+        // the activations, and the 1.7B model's 4.5 GB of them took 5.1 GB
+        // there.
+        let model = device.memory_persistent_allocations((), |()| {
+            Self::load_weights(cfg, weights, dtype, device, read)
+        })?;
+
+        let Model {
+            thinker:
+                Thinker {
+                    audio_tower,
+                    model: text,
+                    lm_head,
+                },
+        } = model;
+        Ok(Self {
+            audio: AudioTower::new(audio_tower, &cfg.thinker_config.audio_config, dtype, device),
+            text,
+            lm_head,
+            decoder: None,
+            text_config: cfg.thinker_config.text_config.clone(),
+            device: device.clone(),
+            dtype,
+        })
+    }
+
+    /// The model's parameters, read from `weights` and cast to `dtype`.
+    fn load_weights(
+        cfg: &Config,
+        weights: &[PathBuf],
+        dtype: DType,
+        device: &Device,
+        read: &Arc<AtomicU64>,
+    ) -> Result<Model, String> {
         let mut model = Model::init(cfg, device);
         let mut results = Vec::with_capacity(weights.len());
         for file in weights {
@@ -220,24 +264,7 @@ impl Qwen3Asr {
             );
         }
         crate::qwen3::check_shards(&results)?;
-
-        let Model {
-            thinker:
-                Thinker {
-                    audio_tower,
-                    model: text,
-                    lm_head,
-                },
-        } = model;
-        Ok(Self {
-            audio: AudioTower::new(audio_tower, &cfg.thinker_config.audio_config, dtype, device),
-            text,
-            lm_head,
-            decoder: None,
-            text_config: cfg.thinker_config.text_config.clone(),
-            device: device.clone(),
-            dtype,
-        })
+        Ok(model)
     }
 
     /// Encodes a log-mel spectrogram of `frames` frames into the (N, hidden)
@@ -380,11 +407,20 @@ impl Qwen3Asr {
         let first = {
             let decoder = self.decoder.as_ref().expect("just ensured");
             let state = &mut *decoder.state.borrow_mut();
-            let hidden =
-                self.text
-                    .transformer
-                    .forward(embeds, 0, &mut state.transformer, &mut Taps::off());
-            let last = hidden.narrow(1, len - 1, 1);
+            let mut last = None;
+            for start in (0..padded).step_by(MAX_PREFILL_PIECE) {
+                let n = MAX_PREFILL_PIECE.min(padded - start);
+                let hidden = self.text.transformer.forward(
+                    embeds.clone().narrow(1, start, n),
+                    start,
+                    &mut state.transformer,
+                    &mut Taps::off(),
+                );
+                if (start..start + n).contains(&(len - 1)) {
+                    last = Some(hidden.narrow(1, len - 1 - start, 1));
+                }
+            }
+            let last = last.expect("the last position lies in some piece");
             let token = self.lm_head.forward(last).argmax(2).reshape([1, 1]);
             state
                 .token
