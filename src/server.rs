@@ -840,7 +840,7 @@ mod tests {
         let frames = frames(app, &body, || {}).await;
         let (last, previews) = frames.split_last().unwrap();
         assert_eq!(last.0, "done", "{frames:?}");
-        assert!(!previews.is_empty());
+        assert_ne!(previews, []);
         for (event, data) in previews {
             assert_eq!(event, "preview");
             assert!(data["text"].is_string());

@@ -943,7 +943,7 @@ mod tests {
                 .iter()
                 .all(|s| *s == Step::LoadingWeights)
         );
-        assert!(!steps[..first_warm].is_empty());
+        assert_ne!(steps[..first_warm], []);
         assert!(reports.iter().filter_map(|r| r.progress).all(|p| p < 1.0));
     }
 
