@@ -120,25 +120,27 @@ step's logits are compared.
 
 | Port vs reference                         | Taps | Worst rel. L2 | Greedy tokens |
 | ----------------------------------------- | ---: | ------------: | ------------: |
-| 0.6B, CPU f32 vs PyTorch f32              |   85 |       1.2e-5  |         30/30 |
-| 1.7B, CPU f32 vs PyTorch f32              |   91 |       7.0e-6  |         30/30 |
-| 0.6B, CUDA f32 (TF32) vs PyTorch f32      |   85 |       5.7e-3  |         30/30 |
-| 0.6B, CUDA bf16 vs PyTorch f32            |   85 |       1.3e-1  |         30/30 |
-| 0.6B, Vulkan f16 vs PyTorch f32           |   85 |       2.3e-2  |         30/30 |
-| 1.7B, Vulkan f16 vs PyTorch f32           |   91 |       9.7e-3  |         30/30 |
-| 0.6B, ROCm f32 vs PyTorch f32             |   85 |       1.6e-5  |         30/30 |
-| 0.6B, ROCm f16 vs PyTorch f32             |   85 |       1.3e-1  |         30/30 |
-| 1.7B, ROCm f16 vs PyTorch f32             |   91 |       3.2e-2  |         30/30 |
+| 0.6B, CPU f32 vs PyTorch f32              |   85 |       1.3e-5  |         30/30 |
+| 1.7B, CPU f32 vs PyTorch f32              |   91 |       5.0e-6  |         30/30 |
+| 0.6B, CUDA f32 (TF32) vs PyTorch f32      |   85 |       5.5e-3  |         30/30 |
+| 0.6B, CUDA bf16 vs PyTorch f32            |   85 |       7.3e-2  |         30/30 |
+| 0.6B, Vulkan f16 vs PyTorch f32           |   85 |       1.6e-2  |         30/30 |
+| 1.7B, Vulkan f16 vs PyTorch f32           |   91 |       1.0e-2  |         30/30 |
+| 0.6B, ROCm f32 vs PyTorch f32             |   85 |       2.7e-5  |         30/30 |
+| 0.6B, ROCm f16 vs PyTorch f32             |   85 |       1.6e-2  |         30/30 |
+| 1.7B, ROCm f16 vs PyTorch f32             |   91 |       8.4e-3  |         30/30 |
 
 In f32 on the CPU the two are the same arithmetic in a different order. On a
 GPU the matmuls run on tensor cores at TF32, which puts every layer near 1e-3
-by itself. In bf16 the error is what the narrower type costs: at the decoder's
-final norm Burn's bf16 is 1.3e-1 from f32 where PyTorch's own bf16 is 1.5e-1.
+by itself. In bf16 the error is what the narrower type costs: PyTorch's own
+bf16 is 1.5e-1 from its f32 at the decoder's final norm.
 f16 keeps three more bits of mantissa than bf16 in a narrower range, which this
 model's activations fit: they peak near 1.1e4, and f16's largest value is 6.5e4.
-ROCm's f16 on an RDNA1 card, the AMD BC-250 measured, lands where CUDA's bf16
-does rather than where Vulkan's f16 does — its f16 kernels lose precision from
-the second convolution on, where its f32 is as exact as the CPU's.
+ROCm's f16 on an RDNA1 card, the AMD BC-250 measured, lands where Vulkan's f16
+does. Its direct convolution kernels lost precision in f16 from the second
+convolution on, which put it at 1.3e-1 and 3.2e-2, no better than bf16; the
+convolutions now run as a matmul over their unfolded columns (see Building),
+which autotune picks there, and that brought it to the figures above.
 
 Run it with `just parity [model] [f32|bf16|f16] [float32|bfloat16] [cargo args]`;
 it provisions the Python reference in `target/parity-venv` on first use.
@@ -152,12 +154,12 @@ build, a Ryzen 9 5900X:
 
 | Build        | Model | Load, warm kernel cache | Transcription |
 | ------------ | ----- | ----------------------: | ------------: |
-| CUDA (bf16)  | 0.6B  |                   4.9 s |        0.21 s |
-| CUDA (bf16)  | 1.7B  |                   6.1 s |        0.25 s |
-| Vulkan (f16) | 0.6B  |                   5.9 s |        0.19 s |
-| Vulkan (f16) | 1.7B  |                   9.9 s |        0.30 s |
-| ROCm (f16)   | 0.6B  |                    76 s |         2.4 s |
-| ROCm (f16)   | 1.7B  |                   134 s |         4.0 s |
+| CUDA (bf16)  | 0.6B  |                   3.8 s |        0.16 s |
+| CUDA (bf16)  | 1.7B  |                   6.0 s |        0.26 s |
+| Vulkan (f16) | 0.6B  |                   4.3 s |        0.21 s |
+| Vulkan (f16) | 1.7B  |                   7.2 s |        0.30 s |
+| ROCm (f16)   | 0.6B  |                    52 s |         1.5 s |
+| ROCm (f16)   | 1.7B  |                   111 s |         3.3 s |
 | CPU (f32)    | 0.6B  |                   8.1 s |         4.9 s |
 
 The CPU build has no kernel cache; its load is mapping the weights, transposing
@@ -176,16 +178,16 @@ and linted in CI, and the CPU one tested there, but no Metal run has been
 measured yet.
 
 ROCm computes in f16 as well, on every AMD card. CubeCL's HIP runtime compiles
-through its LLVM backend, which has no lowering for bf16, yet reports bf16
-supported, so every kernel using it fails to compile. A load whose warm-up
-cannot transcribe at all fails with `load_failed` rather than reporting
-`ready`.
+through its LLVM backend, which has no type for bf16; it used to report bf16
+supported anyway, and every kernel using it failed to compile. A load whose
+warm-up cannot transcribe at all fails with `load_failed` rather than
+reporting `ready`.
 
 Measured on an AMD BC-250 (RDNA1, gfx1013, ROCm 7.2.4), every test passes and
 the fixture clip transcribes word for word. It is a small GPU, and it shows:
-2.4 s for the eleven-second clip and 34 s for a ninety-second one with the
-0.6B model. f32 there is more exact but no faster for short clips — 3.5 s for
-the eleven seconds, 32 s for the ninety — so f16 stays.
+1.5 s for the eleven-second clip and 27 s for a ninety-second one with the
+0.6B model. f32 there, measured before the convolutions ran as a matmul, took
+3.5 s and 32 s, so f16 stays.
 
 The encoder masks its windows with an additive bias rather than a boolean
 mask. On ROCm, Burn's attention with a boolean mask is wrong whatever the
@@ -206,24 +208,25 @@ and PyTorch 2.14 (CUDA 13.0), in bf16 as it shipped. Medians:
 
 | Clip  | 0.6B, Python | 0.6B, Burn | 1.7B, Python | 1.7B, Burn |
 | ----- | -----------: | ---------: | -----------: | ---------: |
-| 5 s   |       0.33 s |     0.08 s |       0.30 s |     0.12 s |
-| 11 s  |       0.66 s |     0.14 s |       0.62 s |     0.24 s |
-| 33 s  |       1.68 s |     0.38 s |       1.73 s |     0.63 s |
-| 66 s  |       2.77 s |     0.64 s |       2.91 s |     1.23 s |
-| 121 s |       4.75 s |     1.34 s |       5.15 s |     2.04 s |
+| 5 s   |       0.33 s |     0.09 s |       0.30 s |     0.14 s |
+| 11 s  |       0.66 s |     0.16 s |       0.62 s |     0.26 s |
+| 33 s  |       1.68 s |     0.42 s |       1.73 s |     0.70 s |
+| 66 s  |       2.77 s |     0.73 s |       2.91 s |     1.43 s |
+| 121 s |       4.75 s |     1.49 s |       5.15 s |     2.34 s |
 
 `transformers` takes as long for the 1.7B model as for the 0.6B one: it is held
 back by the cost of each decoding step on the CPU, not by the GPU, which is
 what the captured step removes. Its first request after a load also took 1.2
-to 2.4 s, where this backend's warm-up leaves it at 0.15 to 0.22 s, and it
+to 2.4 s, where this backend's warm-up leaves it at 0.16 to 0.27 s, and it
 streamed no previews.
 
-What this backend costs in exchange is GPU memory, which it holds from the load
-on rather than growing into: 4.2 GiB for the 0.6B model, where PyTorch went
-from 2.0 GiB to 4.3 GiB over the long clips, and 7.6 GiB for the 1.7B one,
-against PyTorch's 5.8 GiB at most. And the first load of a model builds its
-kernels, which takes about six minutes on CUDA and two on Vulkan, against six or
-seven seconds for `transformers`; loads after it take four to nine seconds.
+What this backend costs in exchange is GPU memory: 3.4 GiB after the load for
+the 0.6B model, 5.0 GiB at most over the long clips, where PyTorch went from
+2.0 GiB to 4.3 GiB, and 6.1 GiB growing to 7.9 GiB for the 1.7B one, against
+PyTorch's 4.6 GiB growing to 5.8 GiB. And the first load of a model builds its
+kernels, which takes seven to eight minutes on CUDA and two on Vulkan, against
+six or seven seconds for `transformers`; loads after it take four to seven
+seconds.
 
 On the CPU, the 0.6B model and the eleven-second clip: 4.9 s here, 4.2 to
 5.1 s for the Python backend in bf16 as it shipped, and 3.1 to 3.5 s for
@@ -244,19 +247,19 @@ and the captured decode step at the shapes real requests use. `ready` then
 means ready.
 
 That warm-up compiles and tunes every kernel the first time a model loads with
-a build, which on an RTX 3090 takes about six minutes on CUDA (361 s for the
-0.6B model, 375 s for the 1.7B) and under two on Vulkan (107 s and 112 s), and
-on an AMD BC-250 about ten on ROCm (612 s and 681 s).
+a build, which on an RTX 3090 takes seven to eight minutes on CUDA (457 s for
+the 0.6B model, 460 s for the 1.7B) and about two on Vulkan (130 s and 136 s),
+and on an AMD BC-250 fourteen to fifteen on ROCm (840 s and 904 s).
 Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
 GPU and driver.
 
 The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
 the daemon grants for keeping things between runs, so only that first load
-pays: a load after it takes 4 to 6 seconds on CUDA and 5 to 9 on Vulkan, and
-on the BC-250 74 and 132 s, most of it the warm-up's longer clips, which that
-GPU transcribes slowly. Without the directory granted,
-the backend keeps them in its private `/tmp`, which dies with the process, and
-every load is a first load.
+pays: a load after it takes 4 to 6 seconds on CUDA and 4 to 7 on Vulkan, and
+on the BC-250 about 50 and 110 s, most of it the warm-up's longer clips, which
+that GPU transcribes slowly. Without the directory granted, the backend keeps
+them in its private `/tmp`, which dies with the process, and every load is a
+first load.
 
 ### Load progress
 
@@ -280,9 +283,9 @@ While a load runs, `GET /v1/status` says what it is doing, for the app to show:
 
 The daemon fails a load whose step and progress stand still for two minutes.
 On the cold loads above the longest such stretch was 6 s on CUDA, 10 s on
-Vulkan and 62 s on the BC-250's ROCm, all while building kernels: on the
-BC-250 a minute went by without a new entry in the cache, half the daemon's
-limit.
+Vulkan and 107 s on the BC-250's ROCm, all while building kernels: on the
+BC-250 almost two minutes went by without a new entry in the cache, close to
+the daemon's limit.
 
 ## Building
 
@@ -299,10 +302,23 @@ Each build carries exactly one accelerator, which is why the recipes pass
 its own would keep the default CPU backend too.
 
 **Burn comes from a fork.** `Cargo.toml` pins `jorge-menjivar/burn` at
-`1e9de733` — the revision the Voxtral backend pins — which is upstream Burn
-plus fixes to its fusion crates, to reading a tensor back to the host and to
-freeing memory under fusion, and repeats the fork's CubeCL patch (`46f7861b`),
-since a `[patch]` in a dependency does not reach the crate being built.
+`059c75e2`, which is upstream Burn's main plus fixes to its fusion crates, to
+reading a tensor back to the host and to freeing memory under fusion, and a
+dense convolution done as a matmul over its unfolded columns, an autotune
+candidate for GPUs whose only other choice is the direct kernel. It repeats the
+fork's CubeCL patch (`8f4b1b36`, CubeCL's main plus the fork's fixes), since a
+`[patch]` in a dependency does not reach the crate being built.
+
+**CUDA compiles through NVRTC.** CubeCL compiles CUDA kernels through LLVM
+unless asked for its C++ backend, and its LLVM backend has no tensor-core form
+for `tf32` or `bf16`: every `f32` matmul runs on the plain cores and `bf16` is
+not offered at all. On an RTX 3090 that made a transcription twice as slow, so
+the CUDA build turns on `cubecl/cuda-cpp`. In `f16`, which LLVM does put on
+tensor cores, it was as fast as the C++ backend for the 1.7B model and 18%
+slower for the 0.6B, and its first load took 185 s rather than 409; but `f16`
+is itself 10 to 15% slower than `bf16` here. ROCm keeps LLVM, the default: it
+computes in `f16`, and the C++ backend compiled so slowly on the BC-250 that a
+first load stood without progress for over four minutes.
 
 ## Testing
 

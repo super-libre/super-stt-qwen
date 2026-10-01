@@ -606,6 +606,15 @@ mod tests {
         let device = crate::qwen3::test_device();
         let cfg = cfg();
         let tower = AudioTower::new(AudioEncoder::init(&cfg, &device), &cfg, DType::F32, &device);
+        // The padded batch is a different matmul shape, which a GPU may tune
+        // to a different kernel: at TF32, the tensor cores' 10-bit mantissa,
+        // that alone moves a frame by about 1e-4. A frame the padding leaked
+        // into would move by orders more.
+        let bound = if crate::model::BUILT_FOR == "cpu" {
+            1e-5
+        } else {
+            1e-3
+        };
         for frames in [37, 530, 800, 1600, 2150] {
             let mel: Vec<f32> = (0..128 * frames)
                 .map(|i| ((i as f32) * 0.013).sin())
@@ -615,7 +624,7 @@ mod tests {
             assert_eq!(padded.dims(), reference.dims(), "{frames} frames");
             let diff = (padded - reference).abs().max().into_scalar::<f32>();
             assert!(
-                diff < 1e-5,
+                diff < bound,
                 "{frames} frames: the padding moved a frame by {diff}"
             );
         }

@@ -504,8 +504,11 @@ mod tests {
         });
     }
 
+    /// Waits up to a minute: a GPU build's warm-up builds its kernels during
+    /// the load, which on an Apple M2 sharing the GPU with the other tests
+    /// took over five seconds even for the fixture.
     async fn settled(app: &axum::Router) -> Value {
-        for _ in 0..500 {
+        for _ in 0..6000 {
             let (_, body) = call(app.clone(), get("/v1/status")).await;
             if body["state"] == "ready" || body["state"] == "error" {
                 return body;
@@ -837,7 +840,7 @@ mod tests {
         let frames = frames(app, &body, || {}).await;
         let (last, previews) = frames.split_last().unwrap();
         assert_eq!(last.0, "done", "{frames:?}");
-        assert!(!previews.is_empty());
+        assert_ne!(previews, []);
         for (event, data) in previews {
             assert_eq!(event, "preview");
             assert!(data["text"].is_string());
