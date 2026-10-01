@@ -308,7 +308,7 @@ pub(crate) mod tests {
 
     #[test]
     fn resampling_nothing_or_to_the_same_rate_copies() {
-        assert!(resample(&[], 48_000, SAMPLE_RATE).is_empty());
+        assert_eq!(resample(&[], 48_000, SAMPLE_RATE), Vec::<f32>::new());
         assert_eq!(resample(&[0.5, -0.5], 0, SAMPLE_RATE), vec![0.5, -0.5]);
         assert_eq!(
             resample(&[0.5, -0.5], SAMPLE_RATE, SAMPLE_RATE),
