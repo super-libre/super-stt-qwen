@@ -746,4 +746,50 @@ mod tests {
         let diff = max_abs_diff(plain_step, padded_step);
         assert!(diff < 1e-5, "the padding moved the next step by {diff}");
     }
+
+    /// A prefill run in pieces at increasing offsets is the prefill run
+    /// whole, and so is the step after it: each piece's queries attend to the
+    /// cache up to their own position, causal from the bottom right corner.
+    /// This is what lets a long prompt's prefill run a bounded piece at a
+    /// time.
+    #[test]
+    fn a_prefill_in_pieces_is_the_prefill_whole() {
+        let device = test_device();
+        let cfg = tiny_config();
+        let stack = Transformer::init(&cfg, &device);
+        let xs = Tensor::<3>::random(
+            [1, 13, cfg.hidden_size],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let prompt = xs.clone().narrow(1, 0, 12);
+        let next = xs.narrow(1, 12, 1);
+        let at = Tensor::<1, Int>::from_data([12i64], &device);
+
+        let mut whole = TransformerState::new(&cfg, 16, DType::F32, &device);
+        let whole_prefill = stack.forward(prompt.clone(), 0, &mut whole, &mut Taps::off());
+        let whole_step = stack.forward_at(next.clone(), &at, &mut whole, 16);
+
+        let mut pieces = TransformerState::new(&cfg, 16, DType::F32, &device);
+        let pieces_prefill = Tensor::cat(
+            [0, 4, 8]
+                .into_iter()
+                .map(|start| {
+                    stack.forward(
+                        prompt.clone().narrow(1, start, 4),
+                        start,
+                        &mut pieces,
+                        &mut Taps::off(),
+                    )
+                })
+                .collect(),
+            1,
+        );
+        let pieces_step = stack.forward_at(next, &at, &mut pieces, 16);
+
+        let diff = max_abs_diff(whole_prefill, pieces_prefill);
+        assert!(diff < 1e-5, "the pieces moved the prompt by {diff}");
+        let diff = max_abs_diff(whole_step, pieces_step);
+        assert!(diff < 1e-5, "the pieces moved the next step by {diff}");
+    }
 }

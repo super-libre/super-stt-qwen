@@ -336,17 +336,22 @@ impl AudioTower {
     /// (chunks, 1, bins, `chunk_frames`), into (chunks, 13, `d_model`), of
     /// which the first `real` chunks are audio.
     ///
-    /// Chunks go through a group at a time, which only bounds memory: the
-    /// first convolution's output is 3 MB per second of audio in bf16. The
-    /// group is a power of two, so that it divides a padded chunk count and
-    /// every group has the same shape.
+    /// Chunks go through an attention window's worth at a time, which only
+    /// bounds memory: the first convolution's output is 3 MB per second of
+    /// audio in half precision. Convolved whole, as the reference's
+    /// `conv_chunksize` of 500 would have it, ninety seconds left the 1.7B
+    /// model's pools 2 GB larger on an RTX 3090 — 7.7 GB against 5.8 — for
+    /// no measurable speed. A window divides every padded chunk count, so
+    /// every group has the same shape, whatever the length of the audio.
     #[allow(clippy::many_single_char_names)]
     fn convolve(&self, padded: &Tensor<4>, real: usize, taps: &mut Taps) -> Tensor<3> {
         let encoder = &self.encoder;
         let act = self.activation();
         let chunks = padded.dims()[0];
-        let most = self.cfg.conv_chunksize.max(1);
-        let group = 1usize << most.ilog2();
+        let group = self
+            .cfg
+            .chunks_per_window()
+            .clamp(1, self.cfg.conv_chunksize.max(1));
         // Only a recording needs the groups' stages whole; production keeps
         // nothing but each group's output.
         let mut stages: [Vec<Tensor<4>>; 3] = Default::default();
@@ -606,6 +611,15 @@ mod tests {
         let device = crate::qwen3::test_device();
         let cfg = cfg();
         let tower = AudioTower::new(AudioEncoder::init(&cfg, &device), &cfg, DType::F32, &device);
+        // The padded batch is a different matmul shape, which a GPU may tune
+        // to a different kernel: at TF32, the tensor cores' 10-bit mantissa,
+        // that alone moves a frame by about 1e-4. A frame the padding leaked
+        // into would move by orders more.
+        let bound = if crate::model::BUILT_FOR == "cpu" {
+            1e-5
+        } else {
+            1e-3
+        };
         for frames in [37, 530, 800, 1600, 2150] {
             let mel: Vec<f32> = (0..128 * frames)
                 .map(|i| ((i as f32) * 0.013).sin())
@@ -615,7 +629,7 @@ mod tests {
             assert_eq!(padded.dims(), reference.dims(), "{frames} frames");
             let diff = (padded - reference).abs().max().into_scalar::<f32>();
             assert!(
-                diff < 1e-5,
+                diff < bound,
                 "{frames} frames: the padding moved a frame by {diff}"
             );
         }

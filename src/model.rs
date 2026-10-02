@@ -185,9 +185,10 @@ const ON_GPU: bool = cfg!(any(
 /// f32.
 ///
 /// So does ROCm, on every AMD card. CubeCL's HIP runtime compiles through its
-/// LLVM backend, which has no lowering for `cube.bf16`, yet reports bf16
-/// supported: every kernel using it fails to compile. The Voxtral backend met
-/// this on a gfx1013 and gets CUDA's transcripts word for word there in f16.
+/// LLVM backend, which has no type for bf16 and now says so; before, it
+/// reported bf16 supported and every kernel using it failed to compile. The
+/// Voxtral backend met that on a gfx1013 and gets CUDA's transcripts word for
+/// word there in f16.
 fn compute_dtype(device: &Device) -> DType {
     let half = if matches!(BUILT_FOR, "vulkan" | "metal" | "rocm") {
         DType::F16
@@ -287,12 +288,12 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
 // What a cold warm-up wrote (see [`expected_cache_entries`]): CUDA and Vulkan
 // on an RTX 3090, ROCm on an AMD BC-250. Metal is taken to be Vulkan,
 // unmeasured.
-const CUDA_ENTRIES_0_6B: u64 = 1480;
-const CUDA_ENTRIES_1_7B: u64 = 1423;
-const ROCM_ENTRIES_0_6B: u64 = 452;
-const ROCM_ENTRIES_1_7B: u64 = 449;
-const VULKAN_ENTRIES_0_6B: u64 = 521;
-const VULKAN_ENTRIES_1_7B: u64 = 527;
+const CUDA_ENTRIES_0_6B: u64 = 2184;
+const CUDA_ENTRIES_1_7B: u64 = 2131;
+const ROCM_ENTRIES_0_6B: u64 = 842;
+const ROCM_ENTRIES_1_7B: u64 = 844;
+const VULKAN_ENTRIES_0_6B: u64 = 983;
+const VULKAN_ENTRIES_1_7B: u64 = 971;
 
 /// Where `CubeCL` keeps this backend's kernels, once [`configure_kernel_cache`]
 /// has said.
@@ -942,7 +943,7 @@ mod tests {
                 .iter()
                 .all(|s| *s == Step::LoadingWeights)
         );
-        assert!(!steps[..first_warm].is_empty());
+        assert_ne!(steps[..first_warm], []);
         assert!(reports.iter().filter_map(|r| r.progress).all(|p| p < 1.0));
     }
 
