@@ -292,8 +292,8 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
 // every other GPU writes within 2% of its 0.6B count for the 1.7B.
 const CUDA_ENTRIES_0_6B: u64 = 2184;
 const CUDA_ENTRIES_1_7B: u64 = 2131;
-const ROCM_ENTRIES_0_6B: u64 = 914;
-const ROCM_ENTRIES_1_7B: u64 = 916;
+const ROCM_ENTRIES_0_6B: u64 = 842;
+const ROCM_ENTRIES_1_7B: u64 = 844;
 const METAL_ENTRIES_0_6B: u64 = 647;
 const METAL_ENTRIES_1_7B: u64 = 647;
 const VULKAN_ENTRIES_0_6B: u64 = 983;

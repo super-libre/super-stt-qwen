@@ -162,7 +162,7 @@ build an Apple M2 with 8 GB and, for the CPU build, a Ryzen 9 5900X:
 | Vulkan (f16) | 0.6B  |                   4.3 s |        0.21 s |
 | Vulkan (f16) | 1.7B  |                   7.2 s |        0.30 s |
 | ROCm (f16)   | 0.6B  |                    52 s |         1.5 s |
-| ROCm (f16)   | 1.7B  |                   111 s |         3.3 s |
+| ROCm (f16)   | 1.7B  |                   114 s |         3.2 s |
 | Metal (f16)  | 0.6B  |                    25 s |        0.93 s |
 | CPU (f32)    | 0.6B  |                   8.1 s |         4.9 s |
 
@@ -261,7 +261,7 @@ means ready.
 That warm-up compiles and tunes every kernel the first time a model loads with
 a build, which on an RTX 3090 takes six to seven minutes on CUDA (413 s for
 the 0.6B model, 367 to 417 s for the 1.7B) and under two on Vulkan (91 s and
-107 s), and on an AMD BC-250 fourteen to fifteen on ROCm (840 s and 904 s). On
+107 s), and on an AMD BC-250 twelve to thirteen on ROCm (709 s and 772 s). On
 the M2 the 0.6B model's takes under three minutes (155 s).
 Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
 GPU and driver.
@@ -269,7 +269,7 @@ GPU and driver.
 The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
 the daemon grants for keeping things between runs, so only that first load
 pays: a load after it takes 4 to 6 seconds on CUDA and 4 to 7 on Vulkan, and
-on the BC-250 about 50 and 110 s, most of it the warm-up's longer clips, which
+on the BC-250 about 50 and 115 s, most of it the warm-up's longer clips, which
 that GPU transcribes slowly, and 25 s for the 0.6B model on the M2. Without the
 directory granted, the backend keeps them in its private `/tmp`, which dies
 with the process, and every load is a first load.
@@ -296,11 +296,11 @@ While a load runs, `GET /v1/status` says what it is doing, for the app to show:
 
 The daemon fails a load whose step and progress stand still for two minutes.
 On the cold loads above the longest such stretch was 6 s on CUDA, 10 s on
-Vulkan, 34 s on the M2's Metal and 107 s on the BC-250's ROCm, all while
-building kernels: on the BC-250 almost two minutes went by without a new entry
-in the cache, close to the daemon's limit. The 1.7B model on the 8 GB M2,
-running from swap, stood still for 113 s on its cold load and 117 s on a warm
-one, within seconds of the limit.
+Vulkan and 34 s on the M2's Metal, while building kernels, and 22 s on the
+BC-250's ROCm, while warming up on the ninety-second clip, which that GPU
+transcribes slowly. The 1.7B model on the 8 GB M2, running from swap, stood
+still for 113 s on its cold load and 117 s on a warm one, within seconds of the
+limit.
 
 ## Building
 
