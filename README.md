@@ -163,7 +163,8 @@ build an Apple M2 with 8 GB and, for the CPU build, a Ryzen 9 5900X:
 | Vulkan (f16) | 1.7B  |                   7.2 s |        0.30 s |
 | ROCm (f16)   | 0.6B  |                    52 s |         1.5 s |
 | ROCm (f16)   | 1.7B  |                   114 s |         3.2 s |
-| Metal (f16)  | 0.6B  |                    25 s |        0.93 s |
+| Metal (f16)  | 0.6B  |                    21 s |        0.80 s |
+| Metal (f16)  | 1.7B  |                    41 s |         1.9 s |
 | CPU (f32)    | 0.6B  |                   8.1 s |         4.9 s |
 
 The CPU build has no kernel cache; its load is mapping the weights, transposing
@@ -178,12 +179,11 @@ that computes in neither half-width type gets f32.
 
 Metal computes in f16 too: every Metal GPU does so natively, and f16 is the
 half-width type measured on this model. On an Apple M2 with 8 GB of memory
-every test passes and the fixture clip transcribes word for word: 0.93 s for
-the eleven-second clip and 8.0 s for a ninety-second one with the 0.6B model,
-which holds 4.4 GB after its load and 5.3 GB over the long clip. The 1.7B model
-holds 9.3 GB, more than that Mac has, so it runs from swap: it transcribes
-correctly, but its warm load took 14 minutes and the eleven-second clip six to
-seven. On Apple Silicon it wants a Mac with 16 GB.
+every test passes and the fixture clip transcribes word for word: 0.80 s for
+the eleven-second clip and 7.2 s for a ninety-second one with the 0.6B model,
+which holds 3.0 GB after its load and 3.2 GB over the long clip, and 1.9 s and
+13 s with the 1.7B model, which holds 5.1 GB and 5.2 GB. Both fit in that Mac
+without swapping.
 
 ROCm computes in f16 as well, on every AMD card. CubeCL's HIP runtime compiles
 through its LLVM backend, which has no type for bf16; it used to report bf16
@@ -270,9 +270,9 @@ The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
 the daemon grants for keeping things between runs, so only that first load
 pays: a load after it takes 4 to 6 seconds on CUDA and 4 to 7 on Vulkan, and
 on the BC-250 about 50 and 115 s, most of it the warm-up's longer clips, which
-that GPU transcribes slowly, and 25 s for the 0.6B model on the M2. Without the
-directory granted, the backend keeps them in its private `/tmp`, which dies
-with the process, and every load is a first load.
+that GPU transcribes slowly, and 21 and 41 s on the M2. Without the directory
+granted, the backend keeps them in its private `/tmp`, which dies with the
+process, and every load is a first load.
 
 ### Load progress
 
@@ -295,12 +295,10 @@ While a load runs, `GET /v1/status` says what it is doing, for the app to show:
   done.
 
 The daemon fails a load whose step and progress stand still for two minutes.
-On the cold loads above the longest such stretch was 6 s on CUDA, 10 s on
-Vulkan and 34 s on the M2's Metal, while building kernels, and 22 s on the
-BC-250's ROCm, while warming up on the ninety-second clip, which that GPU
-transcribes slowly. The 1.7B model on the 8 GB M2, running from swap, stood
-still for 113 s on its cold load and 117 s on a warm one, within seconds of the
-limit.
+On the cold loads above the longest such stretch was 6 s on CUDA and 10 s on
+Vulkan, while building kernels, and 6 s on the M2's Metal and 22 s on the
+BC-250's ROCm, while warming up; on the BC-250 that was the ninety-second clip,
+which that GPU transcribes slowly.
 
 ## Building
 
