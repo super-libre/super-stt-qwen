@@ -336,17 +336,22 @@ impl AudioTower {
     /// (chunks, 1, bins, `chunk_frames`), into (chunks, 13, `d_model`), of
     /// which the first `real` chunks are audio.
     ///
-    /// Chunks go through a group at a time, which only bounds memory: the
-    /// first convolution's output is 3 MB per second of audio in bf16. The
-    /// group is a power of two, so that it divides a padded chunk count and
-    /// every group has the same shape.
+    /// Chunks go through an attention window's worth at a time, which only
+    /// bounds memory: the first convolution's output is 3 MB per second of
+    /// audio in half precision. Convolved whole, as the reference's
+    /// `conv_chunksize` of 500 would have it, ninety seconds left the 1.7B
+    /// model's pools 2 GB larger on an RTX 3090 — 7.7 GB against 5.8 — for
+    /// no measurable speed. A window divides every padded chunk count, so
+    /// every group has the same shape, whatever the length of the audio.
     #[allow(clippy::many_single_char_names)]
     fn convolve(&self, padded: &Tensor<4>, real: usize, taps: &mut Taps) -> Tensor<3> {
         let encoder = &self.encoder;
         let act = self.activation();
         let chunks = padded.dims()[0];
-        let most = self.cfg.conv_chunksize.max(1);
-        let group = 1usize << most.ilog2();
+        let group = self
+            .cfg
+            .chunks_per_window()
+            .clamp(1, self.cfg.conv_chunksize.max(1));
         // Only a recording needs the groups' stages whole; production keeps
         // nothing but each group's output.
         let mut stages: [Vec<Tensor<4>>; 3] = Default::default();

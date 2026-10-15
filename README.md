@@ -162,8 +162,9 @@ build an Apple M2 with 8 GB and, for the CPU build, a Ryzen 9 5900X:
 | Vulkan (f16) | 0.6B  |                   4.3 s |        0.21 s |
 | Vulkan (f16) | 1.7B  |                   7.2 s |        0.30 s |
 | ROCm (f16)   | 0.6B  |                    52 s |         1.5 s |
-| ROCm (f16)   | 1.7B  |                   111 s |         3.3 s |
-| Metal (f16)  | 0.6B  |                    25 s |        0.93 s |
+| ROCm (f16)   | 1.7B  |                   114 s |         3.2 s |
+| Metal (f16)  | 0.6B  |                    21 s |        0.80 s |
+| Metal (f16)  | 1.7B  |                    41 s |         1.9 s |
 | CPU (f32)    | 0.6B  |                   8.1 s |         4.9 s |
 
 The CPU build has no kernel cache; its load is mapping the weights, transposing
@@ -178,12 +179,11 @@ that computes in neither half-width type gets f32.
 
 Metal computes in f16 too: every Metal GPU does so natively, and f16 is the
 half-width type measured on this model. On an Apple M2 with 8 GB of memory
-every test passes and the fixture clip transcribes word for word: 0.93 s for
-the eleven-second clip and 8.0 s for a ninety-second one with the 0.6B model,
-which holds 4.4 GB after its load and 5.3 GB over the long clip. The 1.7B model
-holds 9.3 GB, more than that Mac has, so it runs from swap: it transcribes
-correctly, but its warm load took 14 minutes and the eleven-second clip six to
-seven. On Apple Silicon it wants a Mac with 16 GB.
+every test passes and the fixture clip transcribes word for word: 0.80 s for
+the eleven-second clip and 7.2 s for a ninety-second one with the 0.6B model,
+which holds 3.0 GB after its load and 3.2 GB over the long clip, and 1.9 s and
+13 s with the 1.7B model, which holds 5.1 GB and 5.2 GB. Both fit in that Mac
+without swapping.
 
 ROCm computes in f16 as well, on every AMD card. CubeCL's HIP runtime compiles
 through its LLVM backend, which has no type for bf16; it used to report bf16
@@ -228,13 +228,17 @@ what the captured step removes. Its first request after a load also took 1.2
 to 2.4 s, where this backend's warm-up leaves it at 0.16 to 0.27 s, and it
 streamed no previews.
 
-What this backend costs in exchange is GPU memory: 3.4 GiB after the load for
-the 0.6B model, 5.0 GiB at most over the long clips, where PyTorch went from
-2.0 GiB to 4.3 GiB, and 6.1 GiB growing to 7.9 GiB for the 1.7B one, against
-PyTorch's 4.6 GiB growing to 5.8 GiB. And the first load of a model builds its
-kernels, which takes seven to eight minutes on CUDA and two on Vulkan, against
-six or seven seconds for `transformers`; loads after it take four to seven
-seconds.
+GPU memory stays close to what it holds after the load: 2.5 GiB for the 0.6B
+model and 2.8 GiB at most over the long clips, where PyTorch went from 2.0 GiB
+to 4.3 GiB, and 5.1 GiB growing to 5.3 GiB for the 1.7B one, against PyTorch's
+4.6 GiB growing to 5.8 GiB. The weights live in exact-fit allocations of their
+own, and a long recording's encoder and prefill run a bounded piece at a time,
+so a ninety-second clip needs little more than an eleven-second one. What this
+backend costs in exchange is the first load of a model, which builds its
+kernels: six to seven minutes on CUDA and under two on Vulkan, against six or
+seven seconds for `transformers`, and while autotuning it briefly reaches
+5.2 GiB for the 0.6B model and 7.7 GiB for the 1.7B one on CUDA. Loads after it
+take four to seven seconds.
 
 On the CPU, the 0.6B model and the eleven-second clip: 4.9 s here, 4.2 to
 5.1 s for the Python backend in bf16 as it shipped, and 3.1 to 3.5 s for
@@ -255,20 +259,20 @@ and the captured decode step at the shapes real requests use. `ready` then
 means ready.
 
 That warm-up compiles and tunes every kernel the first time a model loads with
-a build, which on an RTX 3090 takes seven to eight minutes on CUDA (457 s for
-the 0.6B model, 460 s for the 1.7B) and about two on Vulkan (130 s and 136 s),
-and on an AMD BC-250 fourteen to fifteen on ROCm (840 s and 904 s). On the M2
-the 0.6B model's takes under three minutes (155 s).
+a build, which on an RTX 3090 takes six to seven minutes on CUDA (413 s for
+the 0.6B model, 367 to 417 s for the 1.7B) and under two on Vulkan (91 s and
+107 s), and on an AMD BC-250 twelve to thirteen on ROCm (709 s and 772 s). On
+the M2 the 0.6B model's takes under three minutes (155 s).
 Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
 GPU and driver.
 
 The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
 the daemon grants for keeping things between runs, so only that first load
 pays: a load after it takes 4 to 6 seconds on CUDA and 4 to 7 on Vulkan, and
-on the BC-250 about 50 and 110 s, most of it the warm-up's longer clips, which
-that GPU transcribes slowly, and 25 s for the 0.6B model on the M2. Without the
-directory granted, the backend keeps them in its private `/tmp`, which dies
-with the process, and every load is a first load.
+on the BC-250 about 50 and 115 s, most of it the warm-up's longer clips, which
+that GPU transcribes slowly, and 21 and 41 s on the M2. Without the directory
+granted, the backend keeps them in its private `/tmp`, which dies with the
+process, and every load is a first load.
 
 ### Load progress
 
@@ -291,12 +295,10 @@ While a load runs, `GET /v1/status` says what it is doing, for the app to show:
   done.
 
 The daemon fails a load whose step and progress stand still for two minutes.
-On the cold loads above the longest such stretch was 6 s on CUDA, 10 s on
-Vulkan, 34 s on the M2's Metal and 107 s on the BC-250's ROCm, all while
-building kernels: on the BC-250 almost two minutes went by without a new entry
-in the cache, close to the daemon's limit. The 1.7B model on the 8 GB M2,
-running from swap, stood still for 113 s on its cold load and 117 s on a warm
-one, within seconds of the limit.
+On the cold loads above the longest such stretch was 6 s on CUDA and 10 s on
+Vulkan, while building kernels, and 6 s on the M2's Metal and 22 s on the
+BC-250's ROCm, while warming up; on the BC-250 that was the ninety-second clip,
+which that GPU transcribes slowly.
 
 ## Building
 
