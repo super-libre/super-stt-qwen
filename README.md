@@ -163,7 +163,7 @@ build an Apple M2 with 8 GB and, for the CPU build, a Ryzen 9 5900X:
 | Vulkan (f16) | 1.7B  |                   7.2 s |        0.30 s |
 | ROCm (f16)   | 0.6B  |                    52 s |         1.5 s |
 | ROCm (f16)   | 1.7B  |                   111 s |         3.3 s |
-| Metal (f16)  | 0.6B  |                    22 s |        0.80 s |
+| Metal (f16)  | 0.6B  |                    25 s |        0.93 s |
 | CPU (f32)    | 0.6B  |                   8.1 s |         4.9 s |
 
 The CPU build has no kernel cache; its load is mapping the weights, transposing
@@ -178,12 +178,12 @@ that computes in neither half-width type gets f32.
 
 Metal computes in f16 too: every Metal GPU does so natively, and f16 is the
 half-width type measured on this model. On an Apple M2 with 8 GB of memory
-every test passes and the fixture clip transcribes word for word: 0.80 s for
-the eleven-second clip and 7.5 s for a ninety-second one with the 0.6B model,
-which holds 4.4 GB. The 1.7B model holds 9.3 GB, more than that Mac has, so it
-runs from swap: it transcribes correctly, but its warm load took 14 minutes
-and the eleven-second clip six to seven. On Apple Silicon it wants a Mac with
-16 GB.
+every test passes and the fixture clip transcribes word for word: 0.93 s for
+the eleven-second clip and 8.0 s for a ninety-second one with the 0.6B model,
+which holds 4.4 GB after its load and 5.3 GB over the long clip. The 1.7B model
+holds 9.3 GB, more than that Mac has, so it runs from swap: it transcribes
+correctly, but its warm load took 14 minutes and the eleven-second clip six to
+seven. On Apple Silicon it wants a Mac with 16 GB.
 
 ROCm computes in f16 as well, on every AMD card. CubeCL's HIP runtime compiles
 through its LLVM backend, which has no type for bf16; it used to report bf16
@@ -258,7 +258,7 @@ That warm-up compiles and tunes every kernel the first time a model loads with
 a build, which on an RTX 3090 takes seven to eight minutes on CUDA (457 s for
 the 0.6B model, 460 s for the 1.7B) and about two on Vulkan (130 s and 136 s),
 and on an AMD BC-250 fourteen to fifteen on ROCm (840 s and 904 s). On the M2
-the 0.6B model's takes under three minutes (146 s).
+the 0.6B model's takes under three minutes (155 s).
 Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
 GPU and driver.
 
@@ -266,7 +266,7 @@ The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
 the daemon grants for keeping things between runs, so only that first load
 pays: a load after it takes 4 to 6 seconds on CUDA and 4 to 7 on Vulkan, and
 on the BC-250 about 50 and 110 s, most of it the warm-up's longer clips, which
-that GPU transcribes slowly, and 22 s for the 0.6B model on the M2. Without the
+that GPU transcribes slowly, and 25 s for the 0.6B model on the M2. Without the
 directory granted, the backend keeps them in its private `/tmp`, which dies
 with the process, and every load is a first load.
 

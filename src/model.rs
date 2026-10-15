@@ -286,13 +286,15 @@ pub fn select_device(requested: Option<&str>) -> (Device, &'static str) {
 }
 
 // What a cold warm-up wrote (see [`expected_cache_entries`]): CUDA and Vulkan
-// on an RTX 3090, ROCm on an AMD BC-250, Metal on an Apple M2.
+// on an RTX 3090, ROCm on an AMD BC-250, Metal on an Apple M2. The M2's count
+// for the 1.7B model is unmeasured on this Burn and taken to be the 0.6B's:
+// every other GPU writes within 2% of its 0.6B count for the 1.7B.
 const CUDA_ENTRIES_0_6B: u64 = 2370;
 const CUDA_ENTRIES_1_7B: u64 = 2326;
 const ROCM_ENTRIES_0_6B: u64 = 914;
 const ROCM_ENTRIES_1_7B: u64 = 916;
-const METAL_ENTRIES_0_6B: u64 = 138;
-const METAL_ENTRIES_1_7B: u64 = 144;
+const METAL_ENTRIES_0_6B: u64 = 647;
+const METAL_ENTRIES_1_7B: u64 = 647;
 const VULKAN_ENTRIES_0_6B: u64 = 1067;
 const VULKAN_ENTRIES_1_7B: u64 = 1075;
 
