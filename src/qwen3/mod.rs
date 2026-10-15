@@ -102,7 +102,7 @@ impl Taps {
                 .expect("a tensor cast to f32 reads back as f32");
             records.push(Tap {
                 name: name(),
-                shape: data.shape.to_vec(),
+                shape: data.shape().to_vec(),
                 values,
             });
         }
@@ -231,7 +231,7 @@ fn bf16_to_f16(data: &TensorData) -> TensorData {
             });
         }
     });
-    TensorData::new(out, data.shape.clone())
+    TensorData::new(out, data.shape().clone())
 }
 
 /// Loads the PyTorch checkpoints into modules built with [`linear_config`].
