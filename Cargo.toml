@@ -4,7 +4,7 @@
 
 [package]
     name = "super-stt-backend-qwen"
-    version = "0.2.0"
+    version = "0.1.0"
     edition = "2024"
     description = "Qwen3-ASR speech-to-text backend for Super STT."
     repository = "https://github.com/super-libre/super-stt-qwen"

@@ -11,32 +11,17 @@
     id = "app.super-stt.qwen"
     source = "github.com/super-libre/super-stt-qwen"
     name = "Qwen"
-    version = "0.2.0"
+    version = "0.1.0"
     kind = "subprocess"
     entrypoint = "super-stt-backend-qwen"
-    # v3: only a daemon that grants a kernel cache directory installs this
-    # build. Its kernels are compiled on the first load; a daemon without one
-    # would compile them on every load, minutes each time. Generations are
-    # additive, so v3 carries v2's required `id`, which also names the
-    # install directory.
-    contract = "v3"
+    contract = "v4"
+    product = "super-stt"
     license = "GPL-3.0-only"
     description = "Local Qwen3-ASR speech-to-text on Burn: CUDA, ROCm, Vulkan, Metal or CPU, with streamed previews."
 
 [network]
     # Required to be empty for subprocess backends; the transport has no network.
     allowed_hosts = []
-
-# One entry per tarball `.github/workflows/release.yml` builds — the filenames
-# must match it exactly, since the indexer resolves them against the release's
-# assets and pins their hashes. The archives hold the binary at their root,
-# which is where `entrypoint` above says to find it.
-#
-# One build per (target, accelerator). There is no compute-capability axis:
-# Burn compiles every kernel at runtime through CubeCL — NVRTC on CUDA, hiprtc
-# on ROCm, SPIR-V on Vulkan, MSL on Metal — so one CUDA build serves every
-# NVIDIA generation the installed driver can compile for. What is left is the
-# CUDA major version, which decides the API the binary was built against.
 
 [[assets.subprocess]]
     file = "qwen3-asr-x86_64-unknown-linux-gnu-cpu.tar.gz"
@@ -59,20 +44,24 @@
 
 # AMD. The kernels are compiled at runtime here too, so this list is not the
 # set of architectures the binary carries code for — it is the set the backend
-# is claimed to work on, which the schema requires to be explicit. RDNA2
-# through RDNA4 and the CDNA parts; a card outside it will usually work and is
-# simply not advertised.
+# is claimed to work on, which the schema requires to be explicit. A card
+# outside it gets the Vulkan build.
 [[assets.subprocess]]
     file = "qwen3-asr-x86_64-unknown-linux-gnu-rocm.tar.gz"
     target = "x86_64-unknown-linux-gnu"
     accel = "rocm"
     gfx = [
+        "gfx908",
         "gfx90a",
         "gfx942",
+        "gfx1013",
         "gfx1030",
         "gfx1100",
         "gfx1101",
         "gfx1102",
+        "gfx1150",
+        "gfx1151",
+        "gfx1152",
         "gfx1200",
         "gfx1201",
     ]
@@ -122,17 +111,8 @@
     target = "x86_64-apple-darwin"
     accel = "cpu"
 
-# `provider` is a compatibility field: this backend does not read it, and it
-# is declared only because the daemon echoes it on load to backends released
-# against the older identity scheme.
-#
-# `supported_languages` is the thirty languages the checkpoints name, as the
-# BCP-47 codes src/lang.rs maps to those names; a test there holds the two
-# lists together.
-
 [[models]]
     name = "qwen3-asr-0.6b"
-    provider = "local_qwen3_asr"
     multilingual = true
     primary_language = "en"
     supported_languages = [
