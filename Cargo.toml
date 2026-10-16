@@ -72,15 +72,13 @@
     tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
     tokio = {
         version = "1",
-        features = ["macros", "net", "rt-multi-thread", "signal", "sync"]
+        features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"]
     }
     tokio-stream = "0.1"
 
 [dev-dependencies]
     # Reads the reference's layer dump in the parity test.
     safetensors = "0.7"
-    # `tokio::time::sleep` in the load-failure test.
-    tokio = { version = "1", features = ["time"] }
     # `ServiceExt::oneshot` for in-process router tests.
     tower = { version = "0.5", features = ["util"] }
 
