@@ -105,6 +105,10 @@ fn warm_up_runs() -> u64 {
 /// no more: the step's shape does not change from one token to the next.
 const WARM_UP_TOKENS: usize = 4;
 
+/// Encoder and decoder layers [`QwenAsr::build_kernels`] keeps: two, so that
+/// what runs between one layer and the next is built too.
+const BUILD_LAYERS: usize = 2;
+
 /// Audio for the warm-up to transcribe.
 ///
 /// Two tones under a slow tremolo with a little noise rather than silence:
@@ -357,6 +361,20 @@ fn warm_marker(model: &str) -> Option<PathBuf> {
     })
 }
 
+/// Writes `marker`, if there is one, recording a finished warm-up.
+fn mark_warm(marker: Option<&Path>) {
+    let Some(marker) = marker else {
+        return;
+    };
+    let written = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(marker, b""));
+    if let Err(e) = written {
+        log::warn!("could not mark {} warm: {e}", marker.display());
+    }
+}
+
 /// Point `CubeCL`'s kernel cache at `cache_dir`.
 ///
 /// `CubeCL` compiles every kernel it meets at runtime and keeps them on disk so
@@ -555,16 +573,81 @@ impl QwenAsr {
             let _finish = Finish(&tracker);
             Self::load_tracked(backend_dir, model_name, device, phase, &tracker)
         })?;
-        if warmed && let Some(marker) = marker {
-            let written = marker
-                .parent()
-                .map_or(Ok(()), std::fs::create_dir_all)
-                .and_then(|()| std::fs::write(&marker, b""));
-            if let Err(e) = written {
-                log::warn!("could not mark {} warm: {e}", marker.display());
-            }
+        if warmed {
+            mark_warm(marker.as_deref());
         }
         Ok(model)
+    }
+
+    /// Compile and tune the kernels a load of `model_name` needs from its
+    /// `config.json` and tokenizer alone, while its weights are still on their
+    /// way: the load's warm-up, on a model of [`BUILD_LAYERS`] layers whose
+    /// weights are zeros. Its memory is handed back before this returns.
+    ///
+    /// # Errors
+    /// If a file is missing or unreadable, or the warm-up cannot transcribe.
+    pub fn build_kernels(
+        backend_dir: &Path,
+        model_name: &str,
+        device: Option<&str>,
+        report: &(dyn Fn(Report) + Sync),
+    ) -> Result<()> {
+        let dir = backend_dir.join("models").join(model_name);
+        let config_file = model_file(&dir, "config.json")?;
+        let mut config: Config = serde_json::from_slice(
+            &std::fs::read(&config_file)
+                .with_context(|| format!("reading {}", config_file.display()))?,
+        )
+        .with_context(|| format!("parsing {}", config_file.display()))?;
+        let thinker = &mut config.thinker_config;
+        thinker.audio_config.encoder_layers = thinker.audio_config.encoder_layers.min(BUILD_LAYERS);
+        thinker.text_config.num_hidden_layers =
+            thinker.text_config.num_hidden_layers.min(BUILD_LAYERS);
+        let tokenizer = prompt::load_tokenizer(&dir)?;
+
+        let (device, device_name) = select_device(device);
+        let dtype = compute_dtype(&device);
+        log::info!(
+            "building {model_name}'s kernels on {device_name} ({dtype:?}) from {}",
+            dir.display()
+        );
+        let entries = crate::progress::cache_entries();
+        let tracker = Tracker::new(Phase::InitialSetup, report);
+        let warmed = std::thread::scope(|scope| {
+            scope.spawn(|| tracker.run());
+            let _finish = Finish(&tracker);
+            tracker.enter(
+                Step::BuildingKernels,
+                Measure::cache_entries(expected_cache_entries(model_name)),
+            );
+            let mut model = Self {
+                model: Qwen3Asr::zeroed(&config, dtype, &device).map_err(|e| anyhow!(e))?,
+                tokenizer,
+                filters: MelFilters::slaney(config.thinker_config.audio_config.num_mel_bins),
+                eos: Vec::new(),
+                device_name,
+            };
+            model.warm_up(&AtomicU64::new(0))
+        });
+        device.memory_cleanup();
+        if let Err(e) = device.sync() {
+            log::warn!("syncing the device after building the kernels failed: {e:?}");
+        }
+        log::info!(
+            "the kernel build wrote {} kernel-cache entries",
+            crate::progress::cache_entries().saturating_sub(entries)
+        );
+        if warmed? {
+            mark_warm(warm_marker(model_name).as_deref());
+        }
+        Ok(())
+    }
+
+    /// Whether a load of `model_name` would find its kernels built by this
+    /// build. Always, on the CPU, which builds none.
+    #[must_use]
+    pub fn kernels_built(model_name: &str) -> bool {
+        !ON_GPU || warm_marker(model_name).is_some_and(|marker| marker.exists())
     }
 
     /// [`Self::load`] under its tracker. Returns the model and whether its
@@ -664,6 +747,15 @@ impl QwenAsr {
     #[must_use]
     pub fn device_name(&self) -> &'static str {
         self.device_name
+    }
+
+    /// Drop the model and wait until the device has freed it.
+    pub fn release(self) {
+        let device = self.model.device().clone();
+        drop(self);
+        if let Err(e) = device.sync() {
+            log::warn!("syncing the device after freeing the model failed: {e:?}");
+        }
     }
 
     /// Compile and tune the kernels, so the first request does not.
@@ -952,6 +1044,74 @@ mod tests {
         );
         assert_ne!(steps[..first_warm], []);
         assert!(reports.iter().filter_map(|r| r.progress).all(|p| p < 1.0));
+    }
+
+    /// The manifest's `prepare_files` of `model`, and the destinations of its
+    /// `files`.
+    fn prepare_files(model: &str) -> (Vec<&'static str>, Vec<&'static str>) {
+        let manifest = include_str!("../backend.toml");
+        let block = crate::manifest_probe::model_blocks(manifest)
+            .into_iter()
+            .find(|block| crate::manifest_probe::string_field(block, "name") == Some(model))
+            .unwrap();
+        let prepare = crate::manifest_probe::string_list(&block, "prepare_files").unwrap();
+        let destinations = block
+            .iter()
+            .filter_map(|line| line.split_once("destination = \""))
+            .filter_map(|(_, rest)| rest.split('"').next())
+            .collect();
+        (prepare, destinations)
+    }
+
+    #[test]
+    fn every_model_prepares_from_files_it_downloads() {
+        for model in MODELS {
+            let (prepare, destinations) = prepare_files(model);
+            assert!(!prepare.is_empty(), "{model}");
+            for file in prepare {
+                assert!(destinations.contains(&file), "{file} is not a destination");
+            }
+        }
+    }
+
+    #[test]
+    fn kernels_build_from_the_prepare_files_alone() {
+        let backend = fixture::backend(Layout::Single);
+        let (prepare, _) = prepare_files(fixture::MODEL);
+        for entry in std::fs::read_dir(backend.model_dir()).unwrap() {
+            let path = entry.unwrap().path();
+            let name = format!(
+                "models/{}/{}",
+                fixture::MODEL,
+                path.file_name().unwrap().display()
+            );
+            if !prepare.contains(&name.as_str()) {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        backend.edit_json("config.json", |c| {
+            c["thinker_config"]["text_config"]["num_hidden_layers"] = 28.into();
+        });
+        let reports = std::sync::Mutex::new(Vec::new());
+        QwenAsr::build_kernels(&backend.dir, fixture::MODEL, None, &|r| {
+            reports.lock().unwrap().push(r);
+        })
+        .unwrap();
+        let reports = reports.into_inner().unwrap();
+        assert!(reports.iter().all(|r| r.phase == Some(Phase::InitialSetup)));
+        let steps: Vec<Step> = reports.iter().filter_map(|r| r.step).collect();
+        assert_ne!(steps, []);
+        assert!(steps.iter().all(|s| *s == Step::BuildingKernels));
+        // No cache directory in a test, so nothing records the build.
+        assert_eq!(QwenAsr::kernels_built(fixture::MODEL), !ON_GPU);
+    }
+
+    #[test]
+    fn a_kernel_build_without_its_files_fails() {
+        let err =
+            QwenAsr::build_kernels(Path::new("/nonexistent"), "qwen3-asr-0.6b", None, &|_| {})
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("config.json"), "{err:#}");
     }
 
     #[test]

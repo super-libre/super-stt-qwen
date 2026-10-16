@@ -300,6 +300,40 @@ Vulkan, while building kernels, and 6 s on the M2's Metal and 22 s on the
 BC-250's ROCm, while warming up; on the BC-250 that was the ninety-second clip,
 which that GPU transcribes slowly.
 
+### Building the kernels before the weights arrive
+
+The kernels depend on the model's shapes and dtypes, not on its weights, so
+Super STT can have them built while the weights download. `POST /v1/prepare`,
+with the body of `/v1/load`, runs the load's warm-up on a model of two encoder
+and two decoder layers whose weights are zeros. It reads `config.json` and the
+tokenizer's three files alone, which the manifest lists as each model's
+`prepare_files`. The status reads `preparing`, then `prepared`, and the load
+after it is an ordinary one. A load sent during the prepare waits for it on
+the model thread, carries on its progress, and reports both as one
+`initial_setup`. The CPU build builds nothing and answers `prepared` at once.
+
+Measured 2026-10-16 on the RTX 3090, each run from an empty kernel cache in
+one process. "During" is a load sent 20 s into the prepare; the peaks include
+transcribing the fixture clip.
+
+|                              | CUDA 0.6B | CUDA 1.7B | Vulkan 0.6B | Vulkan 1.7B |
+| ---------------------------- | --------: | --------: | ----------: | ----------: |
+| prepare                      |     373 s |     366 s |        33 s |        38 s |
+| load after it                |     4.0 s |     6.5 s |       4.5 s |        12 s |
+| load during it, ready at     |     373 s |     371 s |        37 s |        42 s |
+| plain first load             |     372 s |     351 s |        35 s |        39 s |
+| peak, prepare and load       |   4.0 GiB |   6.4 GiB |     3.3 GiB |     5.7 GiB |
+| peak, plain first load       |   5.2 GiB |   7.7 GiB |     4.1 GiB |     6.7 GiB |
+
+A prepare writes as many kernel-cache entries as a first load (2193 against
+2195 on CUDA with the 0.6B model, 964–974 against 965–969 on Vulkan), and the
+load after it two or three more. It leaves 0.1 GiB on Vulkan and 0.8 GiB on
+CUDA when it hands over. Preparing does not shorten a first load done in one
+go; it takes the build off the download's critical path, and lowers the peak
+by 0.8–1.3 GiB. The longest stretch without progress was 6 s on CUDA and 4 s
+on Vulkan, and a second process over the same cache answers `prepared` at
+once.
+
 ## Building
 
 ```sh

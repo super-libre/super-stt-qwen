@@ -36,9 +36,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use burn::module::{ModuleMapper, Param};
 use burn::nn::{Embedding, EmbeddingConfig, Linear};
 use burn::prelude::*;
-use burn::tensor::{DType, Graph, capture};
+use burn::tensor::{DType, Graph, bf16, capture, f16};
 use burn_store::{FloatCastAdapter, KeyRemapper, ModuleAdapter, ModuleSnapshot, SafetensorsStore};
 
 use crate::qwen3::Taps;
@@ -93,6 +94,26 @@ fn remapper() -> Result<KeyRemapper, String> {
         "thinker.model.transformer.$1.".to_string(),
     )])
     .map_err(|err| format!("invalid remapping: {err}"))
+}
+
+/// Replaces every float parameter with zeros of its shape in `dtype`, made the
+/// way the store makes a loaded one, and without initializing it first.
+struct Zeros {
+    dtype: DType,
+}
+
+impl ModuleMapper for Zeros {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        let shape = param.lazy_shape();
+        let device = param.lazy_device();
+        let data = match self.dtype {
+            DType::BF16 => TensorData::zeros::<bf16, _>(shape),
+            DType::F16 => TensorData::zeros::<f16, _>(shape),
+            _ => TensorData::zeros::<f32, _>(shape),
+        };
+        let id = param.id;
+        param.transform_for_load(Tensor::from_data(data, (&device, self.dtype)), id)
+    }
 }
 
 /// A prompt around the encoded audio: the token ids before the audio and
@@ -217,7 +238,23 @@ impl Qwen3Asr {
         let model = device.memory_persistent_allocations((), |()| {
             Self::load_weights(cfg, weights, dtype, device, read)
         })?;
+        Ok(Self::assemble(model, cfg, dtype, device))
+    }
 
+    /// The model `cfg` describes with every weight zero, in `dtype`: the
+    /// shapes, dtypes and layouts of a loaded one, so it runs the same kernels
+    /// without the checkpoint. Unlike [`Self::load`]'s, its weights live in
+    /// the pools a cleanup hands back to the driver.
+    ///
+    /// # Errors
+    /// If the configuration describes a model this port does not implement.
+    pub fn zeroed(cfg: &Config, dtype: DType, device: &Device) -> Result<Self, String> {
+        cfg.validate()?;
+        let model = Model::init(cfg, device).map(&mut Zeros { dtype });
+        Ok(Self::assemble(model, cfg, dtype, device))
+    }
+
+    fn assemble(model: Model, cfg: &Config, dtype: DType, device: &Device) -> Self {
         let Model {
             thinker:
                 Thinker {
@@ -226,7 +263,7 @@ impl Qwen3Asr {
                     lm_head,
                 },
         } = model;
-        Ok(Self {
+        Self {
             audio: AudioTower::new(audio_tower, &cfg.thinker_config.audio_config, dtype, device),
             text,
             lm_head,
@@ -234,7 +271,7 @@ impl Qwen3Asr {
             text_config: cfg.thinker_config.text_config.clone(),
             device: device.clone(),
             dtype,
-        })
+        }
     }
 
     /// The model's parameters, read from `weights` and cast to `dtype`.
@@ -265,6 +302,11 @@ impl Qwen3Asr {
         }
         crate::qwen3::check_shards(&results)?;
         Ok(model)
+    }
+
+    /// The device the model runs on.
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Encodes a log-mel spectrogram of `frames` frames into the (N, hidden)

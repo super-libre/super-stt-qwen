@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
@@ -24,13 +25,17 @@ use serde_json::{Value, json};
 use crate::lang::{self, Language};
 use crate::model::{self, LoadError, Outcome, QwenAsr};
 use crate::model_thread::ModelThread;
-use crate::progress::Report;
+use crate::progress::{Phase, Report};
 
 /// Where the model is in its lifecycle, as `GET /v1/status` reports it.
 #[derive(Debug, Clone, PartialEq)]
 enum LoadState {
     /// Serving, but no model has been asked for yet.
     Starting,
+    /// A `POST /v1/prepare` is building the kernels, and how far it has got.
+    Preparing { model: String, report: Report },
+    /// The kernels are built, and the load has not been asked for yet.
+    Prepared { model: String },
     /// A `POST /v1/load` is in flight, and how far it has got.
     Loading { model: String, report: Report },
     /// Ready to transcribe.
@@ -78,20 +83,49 @@ impl AppState {
             .clone()
     }
 
-    /// Record how far a load has got, unless it has already ended.
+    /// Record how far a prepare or a load has got, unless it has already ended.
     fn set_report(&self, value: Report) {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        if let LoadState::Loading { report, .. } = &mut *state {
+        if let LoadState::Preparing { report, .. } | LoadState::Loading { report, .. } = &mut *state
+        {
             *report = value;
         }
     }
+
+    /// End a prepare in `next`, unless a load has taken over meanwhile.
+    fn end_prepare(&self, next: LoadState) {
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*state, LoadState::Preparing { .. }) {
+            *state = next;
+        }
+    }
+
+    /// Stop any transcription and free the model on its thread, so the device
+    /// has nothing left to do when the process exits and the driver tears
+    /// itself down. Gives up after [`SHUTDOWN_WAIT`], on a prepare or a load
+    /// still running.
+    pub async fn shut_down(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        let released = self.model.run(|slot| {
+            if let Some(model) = slot.take() {
+                model.release();
+            }
+        });
+        if tokio::time::timeout(SHUTDOWN_WAIT, released).await.is_err() {
+            log::warn!("the model thread is busy; exiting without freeing the model");
+        }
+    }
 }
+
+/// How long a shutdown waits for the model thread.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 /// Build the router.
 pub fn router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
         .route("/v1/ping", get(ping))
         .route("/v1/status", get(status))
+        .route("/v1/prepare", post(prepare))
         .route("/v1/load", post(load))
         .route("/v1/transcribe", post(transcribe))
         .route("/v1/cancel", post(cancel))
@@ -112,20 +146,19 @@ async fn status(State(s): State<Arc<AppState>>) -> Json<Value> {
     let mut body = json!({ "status": "success", "reason": null });
     match s.state() {
         LoadState::Starting => body["state"] = json!("starting"),
+        LoadState::Preparing { model, report } => {
+            body["state"] = json!("preparing");
+            body["model"] = json!({ "name": model });
+            add_report(&mut body, report);
+        }
+        LoadState::Prepared { model } => {
+            body["state"] = json!("prepared");
+            body["model"] = json!({ "name": model });
+        }
         LoadState::Loading { model, report } => {
             body["state"] = json!("loading");
             body["model"] = json!({ "name": model });
-            // Each only while loading, and only once the load has said: an
-            // absent `progress` reads as indeterminate.
-            if let Some(phase) = report.phase {
-                body["phase"] = json!(phase.as_str());
-            }
-            if let Some(step) = report.step {
-                body["step"] = json!(step.as_str());
-            }
-            if let Some(progress) = report.progress {
-                body["progress"] = json!(progress);
-            }
+            add_report(&mut body, report);
         }
         LoadState::Ready { model, device } => {
             body["state"] = json!("ready");
@@ -141,9 +174,23 @@ async fn status(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(body)
 }
 
-/// `POST /v1/load` body. `provider` is not read: it is a compatibility echo
-/// from an older identity scheme, and the contract says a new backend should
-/// not validate it.
+/// A prepare's or a load's `phase`, `step` and `progress`, each only once it
+/// has said: an absent `progress` reads as indeterminate.
+fn add_report(body: &mut Value, report: Report) {
+    if let Some(phase) = report.phase {
+        body["phase"] = json!(phase.as_str());
+    }
+    if let Some(step) = report.step {
+        body["step"] = json!(step.as_str());
+    }
+    if let Some(progress) = report.progress {
+        body["progress"] = json!(progress);
+    }
+}
+
+/// `POST /v1/load` and `POST /v1/prepare` body. `provider` is not read: it is
+/// a compatibility echo from an older identity scheme, and the contract says a
+/// new backend should not validate it.
 #[derive(Debug, Deserialize)]
 struct LoadRequest {
     #[serde(default)]
@@ -152,23 +199,107 @@ struct LoadRequest {
     device: Option<String>,
 }
 
+/// The model and device `body` asks for, if it is a model this backend serves.
+fn requested(body: Option<Json<LoadRequest>>) -> Option<(String, Option<String>)> {
+    body.and_then(|Json(req)| req.name.map(|n| (n, req.device)))
+        .filter(|(n, _)| model::MODELS.contains(&n.as_str()))
+}
+
+fn invalid_model() -> Response {
+    json_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_model",
+        "not a model this backend serves",
+    )
+}
+
+/// `POST /v1/prepare` — answer `202` at once and build the kernels a load of
+/// the model will need in the background, from its small files, while the
+/// daemon downloads its weights.
+///
+/// It runs on the model thread, so a load sent meanwhile waits for it. It
+/// never fails that load: a prepare that errors or panics is logged and goes
+/// back to `starting`, and the load builds the kernels itself.
+async fn prepare(State(s): State<Arc<AppState>>, body: Option<Json<LoadRequest>>) -> Response {
+    let Some((name, device)) = requested(body) else {
+        return invalid_model();
+    };
+    let accepted = || {
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({ "status": "success", "message": "Preparing started" })),
+        )
+            .into_response()
+    };
+    {
+        let mut state = s.state.write().unwrap_or_else(PoisonError::into_inner);
+        match *state {
+            LoadState::Loading { .. } | LoadState::Ready { .. } => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "already_loading",
+                    "a load is in progress or done",
+                );
+            }
+            LoadState::Preparing { .. } | LoadState::Prepared { .. } => return accepted(),
+            LoadState::Starting | LoadState::Failed { .. } => {}
+        }
+        if QwenAsr::kernels_built(&name) {
+            *state = LoadState::Prepared { model: name };
+            return accepted();
+        }
+        *state = LoadState::Preparing {
+            model: name.clone(),
+            report: Report::default(),
+        };
+    }
+
+    let state = Arc::clone(&s);
+    if !s
+        .model
+        .submit(move |_| run_prepare(&state, name, device.as_deref()))
+    {
+        s.end_prepare(LoadState::Starting);
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "load_failed",
+            "the model thread is gone",
+        );
+    }
+    accepted()
+}
+
+/// Runs on the model thread: a prepare, and the state it ends in.
+fn run_prepare(state: &AppState, name: String, device: Option<&str>) {
+    let report = |r: Report| state.set_report(r);
+    let built =
+        model::catching(|| QwenAsr::build_kernels(&state.backend_dir, &name, device, &report))
+            .unwrap_or_else(|panic| Err(anyhow::anyhow!("panicked: {panic}")));
+    match built {
+        Ok(()) => {
+            log::info!("{name}'s kernels are built");
+            state.end_prepare(LoadState::Prepared { model: name });
+        }
+        Err(e) => {
+            log::warn!("building {name}'s kernels ahead of the load failed: {e:#}");
+            state.end_prepare(LoadState::Starting);
+        }
+    }
+}
+
 /// `POST /v1/load` — answer `202` immediately and load in the background.
 ///
 /// The daemon polls `GET /v1/status` for readiness, so returning before the
 /// model is resident is the contract rather than a shortcut: mapping gigabytes
 /// of weights and warming the kernels takes long enough to time out a request.
+///
+/// A load sent during a prepare of the same model carries on its progress, and
+/// reports the two as the one initial setup they are.
 async fn load(State(s): State<Arc<AppState>>, body: Option<Json<LoadRequest>>) -> Response {
-    let name = body
-        .and_then(|Json(req)| req.name.map(|n| (n, req.device)))
-        .filter(|(n, _)| model::MODELS.contains(&n.as_str()));
-    let Some((name, device)) = name else {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_model",
-            "not a model this backend serves",
-        );
+    let Some((name, device)) = requested(body) else {
+        return invalid_model();
     };
-    {
+    let after_prepare = {
         let mut state = s.state.write().unwrap_or_else(PoisonError::into_inner);
         if matches!(*state, LoadState::Loading { .. }) {
             return json_error(
@@ -177,15 +308,28 @@ async fn load(State(s): State<Arc<AppState>>, body: Option<Json<LoadRequest>>) -
                 "a load is already in progress",
             );
         }
+        let carried = match &*state {
+            LoadState::Preparing { model, report } if *model == name => Some(*report),
+            _ => None,
+        };
         *state = LoadState::Loading {
             model: name.clone(),
-            report: Report::default(),
+            report: carried.unwrap_or_default(),
         };
-    }
+        carried.is_some()
+    };
 
     let state = Arc::clone(&s);
     let queued = s.model.submit(move |slot| {
-        let report = |r: Report| state.set_report(r);
+        let report = |mut r: Report| {
+            if after_prepare {
+                if r.step.is_none() {
+                    return;
+                }
+                r.phase = Some(Phase::InitialSetup);
+            }
+            state.set_report(r);
+        };
         // A panic here — an allocation the device refused while the weights
         // were mapped, or a lost device while the old model's memory was
         // freed, say — would otherwise be caught by the model thread and
@@ -547,8 +691,14 @@ mod tests {
         assert!(body.get("progress").is_none());
     }
 
+    const BUILDING: Report = Report {
+        phase: Some(Phase::InitialSetup),
+        step: Some(Step::BuildingKernels),
+        progress: Some(0.5),
+    };
+
     #[tokio::test]
-    async fn status_reports_load_progress_only_while_loading() {
+    async fn status_reports_progress_only_while_preparing_or_loading() {
         let (app, state) = app();
         state.set_state(LoadState::Loading {
             model: "qwen3-asr-1.7b".to_string(),
@@ -559,44 +709,157 @@ mod tests {
         for field in ["phase", "step", "progress"] {
             assert!(body.get(field).is_none(), "{field} before the load said");
         }
-        state.set_report(Report {
-            phase: Some(Phase::InitialSetup),
-            step: Some(Step::BuildingKernels),
-            progress: Some(0.5),
-        });
+        state.set_report(BUILDING);
         let (_, body) = call(app.clone(), get("/v1/status")).await;
         assert_eq!(body["phase"], "initial_setup");
         assert_eq!(body["step"], "building_kernels");
         assert_eq!(body["progress"], 0.5);
         assert_eq!(body["model"]["name"], "qwen3-asr-1.7b");
 
-        // A report that arrives after the load ended changes nothing.
-        ready(&state);
-        state.set_report(Report {
-            phase: Some(Phase::Loading),
-            ..Report::default()
+        state.set_state(LoadState::Preparing {
+            model: "qwen3-asr-1.7b".to_string(),
+            report: Report::default(),
         });
+        state.set_report(BUILDING);
+        let (_, body) = call(app.clone(), get("/v1/status")).await;
+        assert_eq!(body["state"], "preparing");
+        assert_eq!(body["step"], "building_kernels");
+        assert_eq!(body["progress"], 0.5);
+        assert_eq!(body["model"]["name"], "qwen3-asr-1.7b");
+
+        // A report that arrives after the prepare or the load ended changes
+        // nothing.
+        for done in [
+            LoadState::Prepared {
+                model: "qwen3-asr-1.7b".to_string(),
+            },
+            LoadState::Ready {
+                model: "qwen3-asr-1.7b".to_string(),
+                device: "cpu",
+            },
+        ] {
+            state.set_state(done);
+            state.set_report(BUILDING);
+            let (_, body) = call(app.clone(), get("/v1/status")).await;
+            assert_eq!(body["model"]["name"], "qwen3-asr-1.7b");
+            for field in ["phase", "step", "progress"] {
+                assert!(body.get(field).is_none(), "{field} once done: {body}");
+            }
+        }
         let (_, body) = call(app, get("/v1/status")).await;
         assert_eq!(body["state"], "ready");
-        for field in ["phase", "step", "progress"] {
-            assert!(body.get(field).is_none(), "{field} once ready");
-        }
     }
 
     #[tokio::test]
     async fn an_unknown_model_is_invalid() {
-        let (app, _) = app();
-        let (status, body) = call(app, post("/v1/load", &json!({ "name": "nope" }))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["message"], "invalid_model");
+        for route in ["/v1/load", "/v1/prepare"] {
+            let (app, _) = app();
+            let (status, body) = call(app, post(route, &json!({ "name": "nope" }))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{route}");
+            assert_eq!(body["message"], "invalid_model", "{route}");
+        }
     }
 
     #[tokio::test]
     async fn a_load_without_a_name_is_invalid() {
-        let (app, _) = app();
-        let (status, body) = call(app, post("/v1/load", &json!({}))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["message"], "invalid_model");
+        for route in ["/v1/load", "/v1/prepare"] {
+            let (app, _) = app();
+            let (status, body) = call(app, post(route, &json!({}))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{route}");
+            assert_eq!(body["message"], "invalid_model", "{route}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prepare_is_refused_once_a_load_has_begun() {
+        for begun in [
+            LoadState::Loading {
+                model: "qwen3-asr-0.6b".to_string(),
+                report: Report::default(),
+            },
+            LoadState::Ready {
+                model: "qwen3-asr-0.6b".to_string(),
+                device: "cpu",
+            },
+        ] {
+            let (app, state) = app();
+            state.set_state(begun);
+            let (status, body) = call(
+                app,
+                post("/v1/prepare", &json!({ "name": "qwen3-asr-0.6b" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["message"], "already_loading");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_prepare_is_left_alone() {
+        for begun in [
+            LoadState::Preparing {
+                model: "qwen3-asr-0.6b".to_string(),
+                report: BUILDING,
+            },
+            LoadState::Prepared {
+                model: "qwen3-asr-0.6b".to_string(),
+            },
+        ] {
+            let (app, state) = app();
+            state.set_state(begun.clone());
+            let (status, body) = call(
+                app,
+                post("/v1/prepare", &json!({ "name": "qwen3-asr-0.6b" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(body["message"], "Preparing started");
+            assert_eq!(state.state(), begun);
+        }
+    }
+
+    /// Without its files the build fails, and the state goes back to
+    /// `starting` with no reason: the load will build the kernels itself.
+    #[test]
+    fn a_failed_prepare_goes_back_to_starting() {
+        let state = AppState::new(PathBuf::from("/nonexistent"));
+        state.set_state(LoadState::Preparing {
+            model: "qwen3-asr-0.6b".to_string(),
+            report: Report::default(),
+        });
+        run_prepare(&state, "qwen3-asr-0.6b".to_string(), None);
+        assert_eq!(state.state(), LoadState::Starting);
+    }
+
+    #[tokio::test]
+    async fn a_load_during_a_prepare_waits_for_it_and_keeps_its_progress() {
+        let (app, state) = app();
+        state.set_state(LoadState::Preparing {
+            model: "qwen3-asr-0.6b".to_string(),
+            report: BUILDING,
+        });
+        // Holds the model thread, as a prepare still building does, then ends
+        // the way a prepare without its files does.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let preparing = Arc::clone(&state);
+        assert!(state.model.submit(move |_| {
+            held.recv().unwrap();
+            run_prepare(&preparing, "qwen3-asr-0.6b".to_string(), None);
+        }));
+        let body = json!({ "name": "qwen3-asr-0.6b", "device": "cpu" });
+        let (status, _) = call(app.clone(), post("/v1/load", &body)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (_, body) = call(app.clone(), get("/v1/status")).await;
+        assert_eq!(body["state"], "loading");
+        assert_eq!(body["phase"], "initial_setup");
+        assert_eq!(body["step"], "building_kernels");
+        assert_eq!(body["progress"], 0.5);
+        release.send(()).unwrap();
+        // The load fails on the missing weights, and the prepare's ending
+        // does not overwrite that.
+        let body = settled(&app).await;
+        assert_eq!(body["state"], "error");
+        assert_eq!(body["reason"], "load_failed");
     }
 
     /// `provider` is a compatibility echo the contract says not to validate.
@@ -787,6 +1050,43 @@ mod tests {
             assert!(body["transcription"].is_string(), "{body}");
         }
         assert!(!state.busy.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_frees_the_model() {
+        let backend = fixture::backend(Layout::Single);
+        let (_, state) = loaded(&backend).await;
+        state.shut_down().await;
+        assert_eq!(state.model.run(|slot| slot.is_none()).await, Some(true));
+    }
+
+    /// Prepared at once on the CPU, which builds no kernels; on a GPU, built
+    /// from the fixture's small files.
+    #[tokio::test]
+    async fn a_prepared_model_loads_and_transcribes() {
+        let backend = fixture::backend(Layout::Single);
+        let state = Arc::new(AppState::new(backend.dir.clone()));
+        let app = router(Arc::clone(&state));
+        let req = json!({ "name": fixture::MODEL });
+        let (status, _) = call(app.clone(), post("/v1/prepare", &req)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        for _ in 0..6000 {
+            if !matches!(state.state(), LoadState::Preparing { .. }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (_, body) = call(app.clone(), get("/v1/status")).await;
+        assert_eq!(body["state"], "prepared", "{body}");
+        assert_eq!(body["model"]["name"], fixture::MODEL);
+
+        let (status, _) = call(app.clone(), post("/v1/load", &req)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let body = settled(&app).await;
+        assert_eq!(body["state"], "ready", "{body}");
+        let body = json!({ "audio_data": tone(2.0, 16_000), "language": "en" });
+        let (status, body) = call(app, post("/v1/transcribe", &body)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     #[tokio::test]
