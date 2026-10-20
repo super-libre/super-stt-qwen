@@ -126,7 +126,8 @@ async fn serve(backend_dir: PathBuf) -> Result<()> {
         backend_dir.display()
     );
 
-    let app = server::router(Arc::new(server::AppState::new(backend_dir)));
+    let state = Arc::new(server::AppState::new(backend_dir));
+    let app = server::router(Arc::clone(&state));
 
     loop {
         let (stream, _) = tokio::select! {
@@ -141,6 +142,7 @@ async fn serve(backend_dir: PathBuf) -> Result<()> {
             _ = terminate.recv() => {
                 log::info!("SIGTERM; shutting down");
                 let _ = std::fs::remove_file(&socket_path);
+                state.shut_down().await;
                 return Ok(());
             }
         };

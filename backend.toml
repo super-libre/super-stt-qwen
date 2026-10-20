@@ -153,6 +153,12 @@
     # whether a GPU can hold the model at all.
     estimated_vram_bytes = 2500000000
     processing_interval_ms = 1000
+    prepare_files = [
+        "models/qwen3-asr-0.6b/config.json",
+        "models/qwen3-asr-0.6b/tokenizer_config.json",
+        "models/qwen3-asr-0.6b/vocab.json",
+        "models/qwen3-asr-0.6b/merges.txt",
+    ]
     files = [
         { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json", destination = "models/qwen3-asr-0.6b/config.json", sha256 = "76d3ae4601ce939830b2517f4a6cadb86cc51316c3900af6b020b051c21a478c" },
         { url = "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/generation_config.json", destination = "models/qwen3-asr-0.6b/generation_config.json", sha256 = "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c" },
@@ -164,7 +170,6 @@
 
 [[models]]
     name = "qwen3-asr-1.7b"
-    provider = "local_qwen3_asr"
     multilingual = true
     primary_language = "en"
     supported_languages = [
@@ -203,6 +208,12 @@
     # 4.7 GB of bf16 weights, with the same headroom.
     estimated_vram_bytes = 6000000000
     processing_interval_ms = 1500
+    prepare_files = [
+        "models/qwen3-asr-1.7b/config.json",
+        "models/qwen3-asr-1.7b/tokenizer_config.json",
+        "models/qwen3-asr-1.7b/vocab.json",
+        "models/qwen3-asr-1.7b/merges.txt",
+    ]
     files = [
         { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/config.json", destination = "models/qwen3-asr-1.7b/config.json", sha256 = "2e74a751548b8ad7d7526d29365ad8144c345d8b412b1152d25dc6698452712f" },
         { url = "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/main/generation_config.json", destination = "models/qwen3-asr-1.7b/generation_config.json", sha256 = "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c" },
