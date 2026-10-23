@@ -7,13 +7,12 @@
     version = "0.1.0"
     edition = "2024"
     description = "Qwen3-ASR speech-to-text backend for Super STT."
-    repository = "https://github.com/super-libre/super-stt-qwen"
+    repository = "https://github.com/super-libre/super-voice-qwen-asr"
     license = "GPL-3.0-only"
     publish = false
 
 # Own workspace root — never absorbed into a parent workspace.
 [workspace]
-
 
 [[bin]]
     name = "super-stt-backend-qwen"
@@ -22,6 +21,10 @@
 [dependencies]
     anyhow = "1"
     axum = { version = "0.8", default-features = false, features = ["json", "tokio"] }
+    # The binary's build ID, which CubeCL keys its compiled kernels on: the
+    # warm marker in `model.rs` goes by the same key. Already in the graph
+    # through CubeCL.
+    buildid = "1"
     # The model in `src/qwen3` is written against Burn, pinned by revision to the
     # fork's `qwen3-tts-main` branch: upstream Burn main plus the fixes to its
     # fusion crates that the fork carries (the Qwen TTS and Voxtral backends
@@ -37,14 +40,10 @@
         rev = "059c75e21c9f4e4fdb466bbdbf8710873e1e805d",
         features = ["default", "cubecl"]
     }
-    # The binary's build ID, which CubeCL keys its compiled kernels on: the
-    # warm marker in `model.rs` goes by the same key. Already in the graph
-    # through CubeCL.
-    buildid = "1"
     burn-store = {
         git = "https://github.com/jorge-menjivar/burn.git",
         rev = "059c75e21c9f4e4fdb466bbdbf8710873e1e805d",
-        features = ["std", "safetensors"]
+        features = ["safetensors", "std"]
     }
     bytes = "1"
     # CubeCL keeps compiled kernels and tuning results on disk only with its
@@ -52,7 +51,12 @@
     # The CPU build has none of those, yet compiles the kernel-cache setup in
     # `model.rs`; asking for the feature here keeps one configuration for
     # every build. The patch below makes this the fork's crate, like Burn's.
-    cubecl = { git = "https://github.com/tracel-ai/cubecl", rev = "33b6dfbd63cc8fa08346a2c77b04f156b9192e62", default-features = false, features = ["persistence"] }
+    cubecl = {
+        git = "https://github.com/tracel-ai/cubecl",
+        rev = "33b6dfbd63cc8fa08346a2c77b04f156b9192e62",
+        default-features = false,
+        features = ["persistence"]
+    }
     env_logger = "0.11"
     hyper = { version = "1", features = ["http1", "server"] }
     hyper-util = { version = "0.1", features = ["server", "service", "tokio"] }
@@ -69,7 +73,11 @@
     # pre-tokenizer pattern needs a lookahead, which the plain `regex` crate
     # omits, and `fancy-regex` supplies it in Rust where `onig` would pull in a
     # C library.
-    tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+    tokenizers = {
+        version = "0.22",
+        default-features = false,
+        features = ["fancy-regex"]
+    }
     tokio = {
         version = "1",
         features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"]
@@ -106,7 +114,6 @@
 [lints.clippy]
     pedantic = "warn"
 
-
 # The CubeCL the Burn fork's `qwen3-tts-main` branch builds against: CubeCL
 # main plus the fork's `compilation-cache-main` branch. A `[patch]` in
 # Burn's own manifest does not reach a build that merely depends on Burn —
@@ -119,8 +126,23 @@
 # cannot take from several threads at once, and records CUDA and HIP graphs in
 # relaxed mode, so the device thread still serves other streams meanwhile.
 [patch."https://github.com/tracel-ai/cubecl"]
-    cubecl = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
-    cubecl-common = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
-    cubecl-environment = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
-    cubecl-ir = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
-    cubecl-zspace = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
+    cubecl = {
+        git = "https://github.com/jorge-menjivar/cubecl",
+        rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc"
+    }
+    cubecl-common = {
+        git = "https://github.com/jorge-menjivar/cubecl",
+        rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc"
+    }
+    cubecl-environment = {
+        git = "https://github.com/jorge-menjivar/cubecl",
+        rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc"
+    }
+    cubecl-ir = {
+        git = "https://github.com/jorge-menjivar/cubecl",
+        rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc"
+    }
+    cubecl-zspace = {
+        git = "https://github.com/jorge-menjivar/cubecl",
+        rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc"
+    }

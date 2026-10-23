@@ -9,15 +9,15 @@
 
 [backend]
     id = "app.super-stt.qwen"
-    source = "github.com/super-libre/super-stt-qwen"
-    name = "Qwen"
-    version = "0.1.0"
+    source = "github.com/super-libre/super-voice-qwen-asr"
+    name = "Qwen ASR"
+    version = "0.1.1"
     kind = "subprocess"
     entrypoint = "super-stt-backend-qwen"
     contract = "v4"
     product = "super-stt"
     license = "GPL-3.0-only"
-    description = "Local Qwen3-ASR speech-to-text on Burn: CUDA, ROCm, Vulkan, Metal or CPU, with streamed previews."
+    description = "Local Qwen3-ASR speech-to-text with streamed previews."
 
 [network]
     # Required to be empty for subprocess backends; the transport has no network.
