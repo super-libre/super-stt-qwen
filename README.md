@@ -266,7 +266,7 @@ the M2 the 0.6B model's takes under three minutes (155 s).
 Nothing ships pre-warmed: every machine builds its own cache, keyed by its own
 GPU and driver.
 
-The kernels are kept in `SUPER_STT_BACKEND_CACHE_DIR`, the writable directory
+The kernels are kept in `SUPER_VOICE_BACKEND_CACHE_DIR`, the writable directory
 the daemon grants for keeping things between runs, so only that first load
 pays: a load after it takes 4 to 6 seconds on CUDA and 4 to 7 on Vulkan, and
 on the BC-250 about 50 and 115 s, most of it the warm-up's longer clips, which

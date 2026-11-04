@@ -107,7 +107,7 @@ test-tokenizer *args: fetch-tokenizer
     cargo test --locked {{ args }}
 
 # Everything `backend.toml` declares for a model, laid out as the daemon lays
-# it out, so `target/test-backend` works as `SUPER_STT_BACKEND_DIR`.
+# it out, so `target/test-backend` works as `SUPER_VOICE_BACKEND_DIR`.
 #
 # Fetch a model's files. Usage: just fetch-model [qwen3-asr-0.6b|qwen3-asr-1.7b]
 fetch-model model="qwen3-asr-0.6b":
@@ -162,7 +162,7 @@ parity model="qwen3-asr-0.6b" dtype="f32" ref_dtype="float32" *args: parity-env 
     done
     [ -f "$dump" ] || "{{ parity_venv }}/bin/python" scripts/parity_dump.py \
         "{{ test_backend }}/models/{{ model }}" tests/data/jfk.wav "$dump" --dtype {{ ref_dtype }}
-    SUPER_STT_PARITY_REF="$dump" SUPER_STT_BACKEND_DIR="{{ test_backend }}" \
+    SUPER_STT_PARITY_REF="$dump" SUPER_VOICE_BACKEND_DIR="{{ test_backend }}" \
     SUPER_STT_PARITY_MODEL={{ model }} SUPER_STT_PARITY_DTYPE={{ dtype }} \
         cargo test --release --locked {{ args }} layers_match_the_reference -- --nocapture
 

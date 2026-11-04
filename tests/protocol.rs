@@ -106,13 +106,13 @@ fn spawn_with_cache(cache: Cache) -> Backend {
     let socket = dir.0.join("b.sock");
     let mut command = Command::new(env!("CARGO_BIN_EXE_super-stt-backend-qwen"));
     command
-        .env("SUPER_STT_BACKEND_SOCKET", &socket)
-        .env("SUPER_STT_BACKEND_DIR", dir.0.join("backend"))
-        .env_remove("SUPER_STT_BACKEND_CACHE_DIR");
+        .env("SUPER_VOICE_BACKEND_SOCKET", &socket)
+        .env("SUPER_VOICE_BACKEND_DIR", dir.0.join("backend"))
+        .env_remove("SUPER_VOICE_BACKEND_CACHE_DIR");
     match cache {
-        Cache::Granted => command.env("SUPER_STT_BACKEND_CACHE_DIR", dir.0.join("cache")),
+        Cache::Granted => command.env("SUPER_VOICE_BACKEND_CACHE_DIR", dir.0.join("cache")),
         Cache::Absent => &mut command,
-        Cache::Unwritable => command.env("SUPER_STT_BACKEND_CACHE_DIR", "/proc/qwen3-asr-cache"),
+        Cache::Unwritable => command.env("SUPER_VOICE_BACKEND_CACHE_DIR", "/proc/qwen3-asr-cache"),
     };
     let child = command
         .stdout(Stdio::null())

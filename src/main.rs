@@ -4,9 +4,9 @@
 //! A subprocess backend: the daemon spawns this binary inside a hardened
 //! `systemd-run --user` transient unit and drives the `/v1` contract over a
 //! Unix socket. Environment variables are the whole interface —
-//! `SUPER_STT_BACKEND_SOCKET` names the socket to bind, `SUPER_STT_BACKEND_DIR`
+//! `SUPER_VOICE_BACKEND_SOCKET` names the socket to bind, `SUPER_VOICE_BACKEND_DIR`
 //! the directory holding `backend.toml` and the downloaded weights, and
-//! `SUPER_STT_BACKEND_CACHE_DIR`, when the daemon grants one, the one writable
+//! `SUPER_VOICE_BACKEND_CACHE_DIR`, when the daemon grants one, the one writable
 //! place anything may be kept between runs.
 //!
 //! The sandbox shapes the design more than anything else: there is no network
@@ -36,14 +36,14 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::UnixListener;
 
 /// Names the Unix socket to bind.
-const ENV_SOCKET: &str = "SUPER_STT_BACKEND_SOCKET";
+const ENV_SOCKET: &str = "SUPER_VOICE_BACKEND_SOCKET";
 /// Names the backend's own directory.
-const ENV_DIR: &str = "SUPER_STT_BACKEND_DIR";
+const ENV_DIR: &str = "SUPER_VOICE_BACKEND_DIR";
 /// Names the one writable directory the sandbox grants for keeping things
-/// across runs — the STT analogue of Super TTS's `SUPER_TTS_BACKEND_CACHE_DIR`,
+/// across runs — the STT analogue of Super TTS's `SUPER_VOICE_BACKEND_CACHE_DIR`,
 /// spelled the same way by the Voxtral backend. The daemon does not grant it
 /// yet; see [`cache_dir`] for what happens until it does.
-const ENV_CACHE_DIR: &str = "SUPER_STT_BACKEND_CACHE_DIR";
+const ENV_CACHE_DIR: &str = "SUPER_VOICE_BACKEND_CACHE_DIR";
 
 /// Where the compiled kernels go.
 ///
