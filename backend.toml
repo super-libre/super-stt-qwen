@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-#:schema https://jorge-menjivar.github.io/super-stt/backend.schema.json
+#:schema https://jorge-menjivar.github.io/super-voice/backend.schema.json
 # Qwen3-ASR (local, GPU) subprocess backend. See docs/protocol/backend/.
 #
 # Every file below is fetched by the daemon before the first `POST /v1/load`:
@@ -14,8 +14,8 @@
     version = "0.1.0"
     kind = "subprocess"
     entrypoint = "super-stt-backend-qwen"
-    contract = "v4"
-    product = "super-stt"
+    contract = "v1"
+    product = "super-voice"
     license = "GPL-3.0-only"
     description = "Local Qwen3-ASR speech-to-text with streamed previews."
 
@@ -113,6 +113,7 @@
 
 [[models]]
     name = "qwen3-asr-0.6b"
+    role = "transcription"
     multilingual = true
     primary_language = "en"
     supported_languages = [
@@ -170,6 +171,7 @@
 
 [[models]]
     name = "qwen3-asr-1.7b"
+    role = "transcription"
     multilingual = true
     primary_language = "en"
     supported_languages = [
