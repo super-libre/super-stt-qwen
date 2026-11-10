@@ -168,7 +168,7 @@ jobs:
 
   # Publish the browsable HTML coverage report to GitHub Pages (main only).
   # One-time setup: repo Settings → Pages → Source = "GitHub Actions".
-  # Served at https://<owner>.github.io/super-stt-qwen/.
+  # Served at https://<owner>.github.io/super-voice-qwen-asr/.
   coverage-pages:
     name: Coverage (Pages)
     runs-on: ubuntu-latest

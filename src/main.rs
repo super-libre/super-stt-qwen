@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Qwen3-ASR speech-to-text backend for Super STT.
+//! Qwen3-ASR speech-to-text backend for Super Voice.
 //!
 //! A subprocess backend: the daemon spawns this binary inside a hardened
 //! `systemd-run --user` transient unit and drives the `/v1` contract over a
 //! Unix socket. Environment variables are the whole interface —
-//! `SUPER_STT_BACKEND_SOCKET` names the socket to bind, `SUPER_STT_BACKEND_DIR`
-//! the directory holding `backend.toml` and the downloaded weights, and
-//! `SUPER_STT_BACKEND_CACHE_DIR`, when the daemon grants one, the one writable
-//! place anything may be kept between runs.
+//! `SUPER_VOICE_BACKEND_SOCKET` names the socket to bind,
+//! `SUPER_VOICE_BACKEND_DIR` the directory holding `backend.toml` and the
+//! downloaded weights, and `SUPER_VOICE_BACKEND_CACHE_DIR`, when the daemon
+//! grants one, the one writable place anything may be kept between runs. A
+//! Super STT daemon spells them `SUPER_STT_BACKEND_*`, and those are read when
+//! the Super Voice names are not set.
 //!
 //! The sandbox shapes the design more than anything else: there is no network
 //! (`PrivateNetwork=yes`) and the backend directory is mounted read-only, so
@@ -27,6 +29,7 @@ mod prompt;
 mod qwen3;
 mod server;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,14 +39,24 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::UnixListener;
 
 /// Names the Unix socket to bind.
-const ENV_SOCKET: &str = "SUPER_STT_BACKEND_SOCKET";
+const ENV_SOCKET: &str = "SUPER_VOICE_BACKEND_SOCKET";
 /// Names the backend's own directory.
-const ENV_DIR: &str = "SUPER_STT_BACKEND_DIR";
+const ENV_DIR: &str = "SUPER_VOICE_BACKEND_DIR";
 /// Names the one writable directory the sandbox grants for keeping things
-/// across runs — the STT analogue of Super TTS's `SUPER_TTS_BACKEND_CACHE_DIR`,
-/// spelled the same way by the Voxtral backend. The daemon does not grant it
-/// yet; see [`cache_dir`] for what happens until it does.
-const ENV_CACHE_DIR: &str = "SUPER_STT_BACKEND_CACHE_DIR";
+/// across runs. A daemon may grant none; see [`cache_dir`] for what happens
+/// then.
+const ENV_CACHE_DIR: &str = "SUPER_VOICE_BACKEND_CACHE_DIR";
+
+/// One of the `ENV_*` variables, or its Super STT spelling when it is not set.
+///
+/// A Super Voice daemon sets both spellings. A Super STT daemon sets only
+/// `SUPER_STT_BACKEND_*`, and its releases are still installed.
+fn backend_var(name: &str) -> Option<OsString> {
+    std::env::var_os(name).or_else(|| {
+        let rest = name.strip_prefix("SUPER_VOICE_")?;
+        std::env::var_os(format!("SUPER_STT_{rest}"))
+    })
+}
 
 /// Where the compiled kernels go.
 ///
@@ -52,7 +65,7 @@ const ENV_CACHE_DIR: &str = "SUPER_STT_BACKEND_CACHE_DIR";
 /// kernels are compiled and tuned again on every load, and every load reports
 /// itself as an initial setup.
 fn cache_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os(ENV_CACHE_DIR) {
+    if let Some(dir) = backend_var(ENV_CACHE_DIR) {
         log::info!("keeping compiled kernels in {}", Path::new(&dir).display());
         return PathBuf::from(dir);
     }
@@ -93,7 +106,7 @@ fn main() -> Result<()> {
     model::configure_kernel_cache(&cache);
 
     let backend_dir =
-        PathBuf::from(std::env::var(ENV_DIR).with_context(|| format!("{ENV_DIR} is not set"))?);
+        PathBuf::from(backend_var(ENV_DIR).with_context(|| format!("{ENV_DIR} is not set"))?);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -103,9 +116,8 @@ fn main() -> Result<()> {
 }
 
 async fn serve(backend_dir: PathBuf) -> Result<()> {
-    let socket_path = PathBuf::from(
-        std::env::var(ENV_SOCKET).with_context(|| format!("{ENV_SOCKET} is not set"))?,
-    );
+    let socket_path =
+        PathBuf::from(backend_var(ENV_SOCKET).with_context(|| format!("{ENV_SOCKET} is not set"))?);
     // Before the socket exists: the daemon may send SIGTERM as soon as it
     // sees it, and one that lands before the handler kills the process
     // outright, leaving the socket behind.

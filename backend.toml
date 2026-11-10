@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-#:schema https://jorge-menjivar.github.io/super-stt/backend.schema.json
+#:schema https://jorge-menjivar.github.io/super-voice/backend.schema.json
 # Qwen3-ASR (local, GPU) subprocess backend. See docs/protocol/backend/.
 #
 # Every file below is fetched by the daemon before the first `POST /v1/load`:
@@ -8,13 +8,21 @@
 # model's files are fetched.
 
 [backend]
-    id = "app.super-stt.qwen"
-    source = "github.com/super-libre/super-voice-qwen-asr"
+    # The id names the install directory. An install under the old id,
+    # app.super-stt.qwen, moves to this one on update and keeps its models,
+    # because the daemon finds it by `source`.
+    id = "app.super-voice.qwen-asr"
+    # The repository's old name, which GitHub redirects. `source` is the
+    # backend's identity: installed copies find their updates by it, and a
+    # selected model is named by it.
+    source = "github.com/super-libre/super-stt-qwen"
     name = "Qwen ASR"
     version = "0.1.1"
     kind = "subprocess"
-    entrypoint = "super-stt-backend-qwen"
+    entrypoint = "super-voice-backend-qwen-asr"
     contract = "v4"
+    # Super STT releases refuse any other product, and Super Voice reads this
+    # one as its own.
     product = "super-stt"
     license = "GPL-3.0-only"
     description = "Local Qwen3-ASR speech-to-text with streamed previews."

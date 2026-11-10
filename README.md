@@ -1,4 +1,4 @@
-# Super STT — Qwen3-ASR backend
+# Super Voice — Qwen ASR backend
 
 [![coverage](https://img.shields.io/endpoint?url=https://super-libre.github.io/super-voice-qwen-asr/coverage.json)](https://super-libre.github.io/super-voice-qwen-asr/)
 
