@@ -1,4 +1,4 @@
-Super STT — Qwen3-ASR backend
+Super Voice — Qwen ASR backend
 Copyright (C) 2026 Jorge Menjivar <jorge@menjivar.ai>
 
 This program is free software: you can redistribute it and/or modify it under
@@ -9,7 +9,7 @@ version. See LICENSE for the full text.
 This backend derives from the third-party work below. Nothing in this list is
 redistributed in this repository or in its release archives: the inference
 framework is compiled in from a pinned dependency, and the weights are
-downloaded by the Super STT daemon on the user's machine.
+downloaded by the Super Voice daemon on the user's machine.
 
 
 ## qwen-asr — Apache-2.0
@@ -36,7 +36,7 @@ The inference framework, pinned to https://github.com/jorge-menjivar/burn at
 revision 9cd83cc49275b12a9ed982e6be921d15f693b24e. The decoder stack in
 `src/qwen3/transformer.rs`, the checkpoint adapter in `src/qwen3/mod.rs` and
 the model thread in `src/model_thread.rs` are adapted from that revision's
-`examples/qwen3-tts`, by way of the Super TTS Qwen TTS backend.
+`examples/qwen3-tts`, by way of the Super Voice Qwen TTS backend.
 
 
 ## transformers — Apache-2.0
@@ -51,7 +51,7 @@ Qwen2 tokenizer the way its `Qwen2Converter` does.
 
 ## Fetched at runtime, not redistributed here
 
-These are downloaded by the Super STT daemon on the user's machine before first
+These are downloaded by the Super Voice daemon on the user's machine before first
 use, under their own terms; no part of them is contained in this repository or
 its release archives.
 

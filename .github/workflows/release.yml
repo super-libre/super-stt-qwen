@@ -172,7 +172,7 @@ jobs:
           fi
           "$build" build --release --locked --target ${{ matrix.target }} \
             --no-default-features --features "${{ matrix.features }}" \
-            --bin super-stt-backend-qwen
+            --bin super-voice-backend-qwen-asr
 
       # The binary alone. No kernels ship with it: a GPU build compiles and
       # tunes its own on its first load, which reports that as its
@@ -180,7 +180,7 @@ jobs:
       - name: Create tarball
         run: |
           tar -czf "qwen3-asr-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" super-stt-backend-qwen
+            -C "target/${{ matrix.target }}/release" super-voice-backend-qwen-asr
           ls -lh qwen3-asr-*.tar.gz
 
       - uses: actions/upload-artifact@v7
@@ -195,7 +195,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       # backend.toml must ship as a release asset named exactly `backend.toml`:
-      # the super-stt indexer hashes these bytes into the registry's `manifest`
+      # the Super Voice indexer hashes these bytes into the registry's `manifest`
       # pin, and the daemon verifies the installed manifest against that hash
       # (reviewed == pinned == installed). Without it, the indexer falls back to
       # un-pinned repo-source indexing. Checkout brings the tag's backend.toml

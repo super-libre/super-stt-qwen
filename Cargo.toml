@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Standalone Qwen3-ASR subprocess backend. Depends only on third-party crates —
-# no super-stt code. Excluded from any parent workspace (own Cargo.lock).
+# no Super Voice code. Excluded from any parent workspace (own Cargo.lock).
 
 [package]
-    name = "super-stt-backend-qwen"
+    name = "super-voice-backend-qwen-asr"
     version = "0.1.0"
     edition = "2024"
-    description = "Qwen3-ASR speech-to-text backend for Super STT."
+    description = "Qwen3-ASR speech-to-text backend for Super Voice."
     repository = "https://github.com/super-libre/super-voice-qwen-asr"
     license = "GPL-3.0-only"
     publish = false
@@ -15,7 +15,7 @@
 [workspace]
 
 [[bin]]
-    name = "super-stt-backend-qwen"
+    name = "super-voice-backend-qwen-asr"
     path = "src/main.rs"
 
 [dependencies]

@@ -101,18 +101,46 @@ enum Cache {
     Unwritable,
 }
 
+/// The daemon a backend is started by, which decides how its variables are
+/// spelled.
+#[derive(Clone, Copy)]
+enum Daemon {
+    /// `SUPER_VOICE_BACKEND_*`.
+    SuperVoice,
+    /// `SUPER_STT_BACKEND_*`, from a Super STT release.
+    SuperStt,
+}
+
+impl Daemon {
+    fn var(self, name: &str) -> String {
+        match self {
+            Self::SuperVoice => format!("SUPER_VOICE_BACKEND_{name}"),
+            Self::SuperStt => format!("SUPER_STT_BACKEND_{name}"),
+        }
+    }
+}
+
 fn spawn_with_cache(cache: Cache) -> Backend {
+    spawn_by(Daemon::SuperVoice, cache)
+}
+
+fn spawn_by(daemon: Daemon, cache: Cache) -> Backend {
     let dir = TempDir::new();
     let socket = dir.0.join("b.sock");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_super-stt-backend-qwen"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_super-voice-backend-qwen-asr"));
+    // Neither spelling comes in from the environment the tests run in.
+    for name in ["SOCKET", "DIR", "CACHE_DIR"] {
+        for spelling in [Daemon::SuperVoice, Daemon::SuperStt] {
+            command.env_remove(spelling.var(name));
+        }
+    }
     command
-        .env("SUPER_STT_BACKEND_SOCKET", &socket)
-        .env("SUPER_STT_BACKEND_DIR", dir.0.join("backend"))
-        .env_remove("SUPER_STT_BACKEND_CACHE_DIR");
+        .env(daemon.var("SOCKET"), &socket)
+        .env(daemon.var("DIR"), dir.0.join("backend"));
     match cache {
-        Cache::Granted => command.env("SUPER_STT_BACKEND_CACHE_DIR", dir.0.join("cache")),
+        Cache::Granted => command.env(daemon.var("CACHE_DIR"), dir.0.join("cache")),
         Cache::Absent => &mut command,
-        Cache::Unwritable => command.env("SUPER_STT_BACKEND_CACHE_DIR", "/proc/qwen3-asr-cache"),
+        Cache::Unwritable => command.env(daemon.var("CACHE_DIR"), "/proc/qwen3-asr-cache"),
     };
     let child = command
         .stdout(Stdio::null())
@@ -242,4 +270,16 @@ fn serves_without_a_usable_cache_directory() {
         let (code, body) = request(&backend.socket, "GET", "/v1/ping", None);
         assert_eq!(code, 200, "{body}");
     }
+}
+
+/// Super STT releases are still installed, and their daemon spells the
+/// variables `SUPER_STT_BACKEND_*`: the backend starts under those names, and
+/// keeps its kernels in the cache directory they grant.
+#[test]
+fn starts_under_the_super_stt_names() {
+    let backend = spawn_by(Daemon::SuperStt, Cache::Granted);
+    let (code, body) = request(&backend.socket, "GET", "/v1/ping", None);
+    assert_eq!(code, 200, "{body}");
+    let cache = backend.socket.with_file_name("cache");
+    assert!(cache.is_dir(), "{} was not created", cache.display());
 }

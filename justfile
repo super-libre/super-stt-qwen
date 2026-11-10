@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Task runner for the standalone Qwen3-ASR backend. Mirrors the recipe names
-# used by the main super-stt repo and by the other out-of-tree backends, so
+# used by the main Super Voice repo and by the other out-of-tree backends, so
 # `just check` means the same thing everywhere.
 #
 # Burn comes from a fork, pinned by revision in Cargo.toml. The first build
@@ -53,8 +53,8 @@ build-metal *args:
 #
 # Build and stage the binary for Import-from-dir. Usage: just stage [args]
 stage *args: (build-release args)
-    cp target/release/super-stt-backend-qwen super-stt-backend-qwen
-    @echo "staged super-stt-backend-qwen — this directory is now installable with Import from dir"
+    cp target/release/super-voice-backend-qwen-asr super-voice-backend-qwen-asr
+    @echo "staged super-voice-backend-qwen-asr — this directory is now installable with Import from dir"
 
 # Remove build output.
 clean:
@@ -62,9 +62,9 @@ clean:
 
 # Remove build output and every generated artifact in the tree.
 clean-all: clean
-    rm -f super-stt-backend-qwen lcov.info *.profraw *.profdata
+    rm -f super-voice-backend-qwen-asr lcov.info *.profraw *.profdata
 
-# Runs a clippy check — mirrors super-stt's lint.
+# Runs a clippy check — mirrors Super Voice's lint.
 check *args:
     cargo clippy --all-targets {{ args }} -- -W clippy::pedantic -D warnings -D unused_must_use
 
@@ -107,7 +107,7 @@ test-tokenizer *args: fetch-tokenizer
     cargo test --locked {{ args }}
 
 # Everything `backend.toml` declares for a model, laid out as the daemon lays
-# it out, so `target/test-backend` works as `SUPER_STT_BACKEND_DIR`.
+# it out, so `target/test-backend` works as `SUPER_VOICE_BACKEND_DIR`.
 #
 # Fetch a model's files. Usage: just fetch-model [qwen3-asr-0.6b|qwen3-asr-1.7b]
 fetch-model model="qwen3-asr-0.6b":
@@ -162,8 +162,8 @@ parity model="qwen3-asr-0.6b" dtype="f32" ref_dtype="float32" *args: parity-env 
     done
     [ -f "$dump" ] || "{{ parity_venv }}/bin/python" scripts/parity_dump.py \
         "{{ test_backend }}/models/{{ model }}" tests/data/jfk.wav "$dump" --dtype {{ ref_dtype }}
-    SUPER_STT_PARITY_REF="$dump" SUPER_STT_BACKEND_DIR="{{ test_backend }}" \
-    SUPER_STT_PARITY_MODEL={{ model }} SUPER_STT_PARITY_DTYPE={{ dtype }} \
+    SUPER_VOICE_PARITY_REF="$dump" SUPER_VOICE_BACKEND_DIR="{{ test_backend }}" \
+    SUPER_VOICE_PARITY_MODEL={{ model }} SUPER_VOICE_PARITY_DTYPE={{ dtype }} \
         cargo test --release --locked {{ args }} layers_match_the_reference -- --nocapture
 
 # cross-rs builds inside a container, so no local CUDA or C toolchain is needed.
