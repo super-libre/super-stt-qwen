@@ -17,6 +17,7 @@
 //! everything named in `[[models.files]]` before the first `POST /v1/load`.
 
 mod audio;
+mod context;
 #[cfg(test)]
 mod fixture;
 mod lang;
