@@ -31,6 +31,13 @@
     # Required to be empty for subprocess backends; the transport has no network.
     allowed_hosts = []
 
+# The user's dictation context, as `x-voice-prompt` and `x-voice-vocabulary`
+# headers. Qwen3-ASR reads both: they become the system turn of its prompt,
+# the slot its reference fills with `transcribe(context=...)`, the terms one
+# to a line and then the prompt (see src/context.rs).
+[capabilities]
+    context = true
+
 [[assets.subprocess]]
     file = "qwen3-asr-x86_64-unknown-linux-gnu-cpu.tar.gz"
     target = "x86_64-unknown-linux-gnu"

@@ -5,7 +5,8 @@
 Qwen's [Qwen3-ASR](https://huggingface.co/Qwen) speech recognition models as a
 subprocess backend for [Super Voice](https://github.com/jorge-menjivar/super-voice).
 Thirty languages, detected or named, on Linux and macOS, on the CPU or on any
-GPU that CUDA, ROCm, Vulkan or Metal can drive.
+GPU that CUDA, ROCm, Vulkan or Metal can drive. It hears your dictation
+context: the vocabulary and prompt you set in Super Voice steer what it writes.
 
 ## What it is
 

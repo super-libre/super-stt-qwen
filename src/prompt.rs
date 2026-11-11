@@ -27,7 +27,9 @@
 //! <|im_start|>assistant\n[language {Name}<asr_text>]
 //! ```
 //!
-//! The context is empty: the reference's default, and what the Python backend
+//! The context is the user's dictation context, folded into one text by
+//! [`crate::context`] and cut to its budget by [`fit_context`], and empty when
+//! they have none: the reference's default, and all the Python backend ever
 //! sent. The bracketed tail is added when the request forces a language; the
 //! model then answers with the text alone. Without it, the model begins its
 //! answer with `language {Name}<asr_text>` itself.
@@ -136,10 +138,16 @@ pub fn load_tokenizer(model_dir: &Path) -> Result<Tokenizer> {
         .map_err(|e| anyhow!("assembling the tokenizer: {e}"))
 }
 
-/// The template's text either side of the audio placeholders.
+/// The template's text either side of the audio placeholders, with `context`
+/// as the system turn.
+///
+/// The whole of it is tokenized as one string, as the reference tokenizes the
+/// chat template's output, so a context is split into tokens the way the
+/// model saw contexts split in training.
 #[must_use]
-pub fn template(language: Language) -> (String, String) {
-    let before = "<|im_start|>system\n<|im_end|>\n<|im_start|>user\n<|audio_start|>".to_string();
+pub fn template(context: &str, language: Language) -> (String, String) {
+    let before =
+        format!("<|im_start|>system\n{context}<|im_end|>\n<|im_start|>user\n<|audio_start|>");
     let mut after = "<|audio_end|><|im_end|>\n<|im_start|>assistant\n".to_string();
     if let Language::Forced(name) = language {
         after.push_str("language ");
@@ -147,6 +155,57 @@ pub fn template(language: Language) -> (String, String) {
         after.push_str(ASR_TEXT_TAG);
     }
     (before, after)
+}
+
+/// `context`, trimmed, and cut to about `max_tokens` tokens if it runs longer:
+/// the start of it is kept, which [`crate::context::fold`] fills with the
+/// terms, and the cut goes back to the last whitespace before the limit, so
+/// that a term or a word is kept whole or not at all.
+///
+/// About, because the text kept is tokenized again inside the template; a cut
+/// at a token's start re-tokenizes to the same tokens or near enough.
+///
+/// # Errors
+/// If the tokenizer fails on the context.
+pub fn fit_context<'a>(
+    tokenizer: &Tokenizer,
+    context: &'a str,
+    max_tokens: usize,
+) -> Result<&'a str> {
+    let context = context.trim();
+    let encoding = tokenizer
+        .encode(context, false)
+        .map_err(|e| anyhow!("tokenizing the dictation context: {e}"))?;
+    let offsets = encoding.get_offsets();
+    let Some(&(first_dropped, _)) = offsets.get(max_tokens) else {
+        return Ok(context);
+    };
+    let kept = cut_before(context, first_dropped);
+    log::info!(
+        "the dictation context is {} tokens, over the {max_tokens} a transcription is prompted \
+         with; keeping its first {} of {} characters",
+        offsets.len(),
+        kept.chars().count(),
+        context.chars().count(),
+    );
+    Ok(kept)
+}
+
+/// `text` up to byte `end`, cut back to the last whitespace before it when
+/// there is one, and trimmed. A text with no whitespace before `end`, as
+/// Chinese or Japanese is written, is cut at `end` itself.
+fn cut_before(text: &str, end: usize) -> &str {
+    let mut end = end.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &text[..end];
+    let at_space = text[end..].starts_with(char::is_whitespace);
+    let head = match head.rfind(char::is_whitespace) {
+        Some(space) if !at_space => &head[..space],
+        _ => head,
+    };
+    head.trim_end()
 }
 
 /// The text of a finished answer, the reference's `parse_asr_output`.
@@ -291,20 +350,20 @@ mod tests {
         let tokenizer = load_tokenizer(&dir).unwrap();
         let encode = |s: &str| tokenizer.encode(s, false).unwrap().get_ids().to_vec();
 
-        let (before, after) = template(Language::Detect);
+        let (before, after) = template("", Language::Detect);
         assert_eq!(
             encode(&before),
             [151_644, 8948, 198, 151_645, 198, 151_644, 872, 198, 151_669]
         );
         assert_eq!(encode(&after), [151_670, 151_645, 198, 151_644, 77091, 198]);
-        let (_, forced) = template(Language::Forced("English"));
+        let (_, forced) = template("", Language::Forced("English"));
         assert_eq!(
             encode(&forced),
             [
                 151_670, 151_645, 198, 151_644, 77091, 198, 11528, 6364, 151_704
             ]
         );
-        let (_, forced) = template(Language::Forced("Cantonese"));
+        let (_, forced) = template("", Language::Forced("Cantonese"));
         assert_eq!(
             encode(&forced),
             [
@@ -336,6 +395,63 @@ mod tests {
             )
             .unwrap();
         assert_eq!(decoded, "language English<asr_text>Hello, 北京!");
+    }
+
+    /// A context sits between `system\n` and `<|im_end|>` and tokenizes as
+    /// it would alone: the newline before it is a token of its own, and the
+    /// special token after it is split out first.
+    #[test]
+    fn a_context_fills_the_system_turn() {
+        let Some(dir) = tokenizer_dir() else {
+            eprintln!("skipping: no tokenizer files; run `just fetch-tokenizer`");
+            return;
+        };
+        let tokenizer = load_tokenizer(&dir).unwrap();
+        let encode = |s: &str| tokenizer.encode(s, false).unwrap().get_ids().to_vec();
+
+        let context = "Super Voice\nMenjivar, Jorge\n\nAn email about the release.";
+        let (before, _) = template(context, Language::Detect);
+        assert!(before.starts_with("<|im_start|>system\nSuper Voice\n"));
+        let (empty, _) = template("", Language::Detect);
+        let empty = encode(&empty);
+        let expected: Vec<u32> = [&empty[..3], &encode(context)[..], &empty[3..]].concat();
+        assert_eq!(encode(&before), expected);
+    }
+
+    #[test]
+    fn a_long_context_keeps_its_start_in_whole_words() {
+        let Some(dir) = tokenizer_dir() else {
+            eprintln!("skipping: no tokenizer files; run `just fetch-tokenizer`");
+            return;
+        };
+        let tokenizer = load_tokenizer(&dir).unwrap();
+        let count = |s: &str| tokenizer.encode(s, false).unwrap().get_ids().len();
+
+        let short = "  Super Voice\nQwen  ";
+        assert_eq!(fit_context(&tokenizer, short, 512).unwrap(), short.trim());
+
+        let terms: Vec<String> = (0..400).map(|i| format!("Term{i}")).collect();
+        let long = terms.join("\n");
+        let kept = fit_context(&tokenizer, &long, 512).unwrap();
+        assert!(long.starts_with(kept));
+        assert!(count(kept) <= 512, "{}", count(kept));
+        // Whole terms only: the last line kept is one of them.
+        let last = kept.lines().last().unwrap();
+        assert!(terms.iter().any(|t| t == last), "{last:?}");
+        assert!(count(kept) > 400, "cut back too far: {}", count(kept));
+    }
+
+    #[test]
+    fn a_cut_goes_back_to_whitespace() {
+        // Mid-word: back to the space before it.
+        assert_eq!(cut_before("alpha beta gamma", 8), "alpha");
+        // At a space: the word before it is whole.
+        assert_eq!(cut_before("alpha beta gamma", 10), "alpha beta");
+        assert_eq!(cut_before("alpha\nbeta", 7), "alpha");
+        // No whitespace to go back to: cut where it falls, on a character.
+        assert_eq!(cut_before("北京欢迎你", 7), "北京");
+        assert_eq!(cut_before("北京欢迎你", 6), "北京");
+        assert_eq!(cut_before("short", 99), "short");
     }
 
     #[test]

@@ -5,8 +5,10 @@
 //! The model itself is in [`crate::qwen3`]. Everything here is the part that
 //! faces the daemon, and it follows what the Python backend it replaces did
 //! through the `qwen-asr` package, step for step: audio normalized and cut as
-//! [`crate::audio`] describes, the chat template of [`crate::prompt`] with an
-//! empty context, greedy decoding, and the answer parsed back to its text.
+//! [`crate::audio`] describes, the chat template of [`crate::prompt`] with the
+//! user's dictation context as its system turn (empty, as the Python backend
+//! always sent it, when they have none), greedy decoding, and the answer
+//! parsed back to its text.
 //!
 //! Everything here is synchronous and compute-bound, and the model is not
 //! `Send`, so it lives on [`crate::model_thread`] and the handlers send it
@@ -790,7 +792,8 @@ impl QwenAsr {
                     tokens += 1;
                     tokens <= WARM_UP_TOKENS
                 };
-                let result = catching(|| self.transcribe(&samples, language, keep_going, |_| {}));
+                let result =
+                    catching(|| self.transcribe(&samples, language, "", keep_going, |_| {}));
                 let error = match result {
                     Ok(Ok(_)) => None,
                     Ok(Err(e)) => Some(format!("{e:#}")),
@@ -828,6 +831,10 @@ impl QwenAsr {
     /// Transcribe `samples`, mono 16 kHz in `[-1, 1]` (see
     /// [`crate::audio::normalize`]).
     ///
+    /// `context` is the user's dictation context, as [`crate::context`] folds
+    /// it, or empty; it is cut to [`crate::context::MAX_TOKENS`], and every
+    /// piece of a long recording is prompted with it.
+    ///
     /// `should_continue` is checked once per decoded token, so a cancel is
     /// noticed within a token. `on_preview` sees the transcription so far each
     /// time it grows; a recording long enough to be cut into pieces previews
@@ -839,10 +846,12 @@ impl QwenAsr {
         &mut self,
         samples: &[f32],
         language: Language,
+        context: &str,
         mut should_continue: impl FnMut() -> bool,
         mut on_preview: impl FnMut(&str),
     ) -> Result<Outcome> {
-        let (before, after) = prompt::template(language);
+        let context = prompt::fit_context(&self.tokenizer, context, crate::context::MAX_TOKENS)?;
+        let (before, after) = prompt::template(context, language);
         let prefix = self.encode(&before)?;
         let suffix = self.encode(&after)?;
 
@@ -965,6 +974,7 @@ mod tests {
                 .transcribe(
                     &samples,
                     language,
+                    "",
                     || true,
                     |p| previews.push(p.to_string()),
                 )
@@ -980,6 +990,7 @@ mod tests {
             .transcribe(
                 &samples,
                 Language::Forced("English"),
+                "",
                 || {
                     tokens += 1;
                     tokens <= 5
@@ -999,6 +1010,7 @@ mod tests {
             .transcribe(
                 &samples,
                 Language::Detect,
+                "",
                 || {
                     tokens += 1;
                     tokens <= 1
@@ -1128,7 +1140,7 @@ mod tests {
         for language in [Language::Detect, Language::Forced("English")] {
             let mut previews: Vec<String> = Vec::new();
             let outcome = model
-                .transcribe(&samples, language, || true, |p| previews.push(p.into()))
+                .transcribe(&samples, language, "", || true, |p| previews.push(p.into()))
                 .unwrap();
             let Outcome::Finished(text) = outcome else {
                 panic!("{language:?} was not finished: {outcome:?}");
@@ -1146,6 +1158,7 @@ mod tests {
             .transcribe(
                 &samples,
                 Language::Forced("English"),
+                "",
                 || {
                     tokens += 1;
                     tokens <= 3
@@ -1154,6 +1167,29 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, Outcome::Stopped(_)), "{outcome:?}");
+    }
+
+    /// A context lengthens the prompt: a short one within the prefill's first
+    /// bucket, and one over the budget, cut to it, across several. The
+    /// fixture's tokenizer has no merges, so every byte is a token.
+    #[test]
+    fn transcribes_with_a_context() {
+        let backend = fixture::backend(Layout::Single);
+        let mut model = load_fixture(&backend).unwrap();
+        let samples = warm_up_audio(1.0);
+        let long = (0..400)
+            .map(|i| format!("Term{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(long.len() > 2 * crate::context::MAX_TOKENS);
+        for context in ["Qwen", long.as_str()] {
+            for language in [Language::Detect, Language::Forced("English")] {
+                let outcome = model
+                    .transcribe(&samples, language, context, || true, |_| {})
+                    .unwrap();
+                assert!(matches!(outcome, Outcome::Finished(_)), "{outcome:?}");
+            }
+        }
     }
 
     /// A load that fails says why, with `load_failed`.

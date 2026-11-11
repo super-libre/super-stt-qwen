@@ -16,7 +16,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -421,8 +421,12 @@ struct TranscribeRequest {
 /// model that is not ready, then missing audio, then a language the model does
 /// not transcribe — so each is the `4xx` the contract names rather than an
 /// error frame inside a stream that already claimed success.
+///
+/// The dictation context rides in the request's headers (see
+/// [`crate::context`]); a request without them is transcribed with none.
 async fn transcribe(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: Result<Json<TranscribeRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     if !matches!(s.state(), LoadState::Ready { .. }) {
@@ -455,11 +459,17 @@ async fn transcribe(
         .unwrap_or_default()
         .stream_realtime
         .unwrap_or(false);
+    let input = Input {
+        audio,
+        sample_rate,
+        language,
+        context: crate::context::from_headers(&headers),
+    };
 
     if stream {
-        transcribe_streaming(&s, audio, sample_rate, language)
+        transcribe_streaming(&s, input)
     } else {
-        transcribe_oneshot(&s, audio, sample_rate, language).await
+        transcribe_oneshot(&s, input).await
     }
 }
 
@@ -472,16 +482,29 @@ impl Drop for Idle<'_> {
     }
 }
 
+/// What one validated request asks to be transcribed.
+struct Input {
+    audio: Vec<f32>,
+    sample_rate: u32,
+    language: Language,
+    /// The dictation context, folded; empty when there is none.
+    context: String,
+}
+
 /// Runs on the model thread: one transcription, with the busy and cancel flags
 /// kept around it.
 fn run_transcription(
     slot: &mut Option<QwenAsr>,
     state: &AppState,
-    audio: Vec<f32>,
-    sample_rate: u32,
-    language: Language,
+    input: Input,
     mut on_preview: impl FnMut(&str) -> bool,
 ) -> anyhow::Result<Outcome> {
+    let Input {
+        audio,
+        sample_rate,
+        language,
+        context,
+    } = input;
     let Some(model) = slot.as_mut() else {
         anyhow::bail!("no model is loaded");
     };
@@ -496,21 +519,17 @@ fn run_transcription(
     model.transcribe(
         &samples,
         language,
+        &context,
         || listening.get() && !state.cancelled.load(Ordering::SeqCst),
         |text| listening.set(on_preview(text)),
     )
 }
 
-async fn transcribe_oneshot(
-    s: &Arc<AppState>,
-    audio: Vec<f32>,
-    sample_rate: u32,
-    language: Language,
-) -> Response {
+async fn transcribe_oneshot(s: &Arc<AppState>, input: Input) -> Response {
     let state = Arc::clone(s);
     let result = s
         .model
-        .run(move |slot| run_transcription(slot, &state, audio, sample_rate, language, |_| true))
+        .run(move |slot| run_transcription(slot, &state, input, |_| true))
         .await;
     match result {
         // A cancelled one-shot answers with what it had transcribed, as a
@@ -542,19 +561,14 @@ fn sse(event: &str, data: &Value) -> bytes::Bytes {
     bytes::Bytes::from(format!("event: {event}\ndata: {data}\n\n"))
 }
 
-fn transcribe_streaming(
-    s: &Arc<AppState>,
-    audio: Vec<f32>,
-    sample_rate: u32,
-    language: Language,
-) -> Response {
+fn transcribe_streaming(s: &Arc<AppState>, input: Input) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
     let state = Arc::clone(s);
     let queued = s.model.submit(move |slot| {
         let send = |frame: bytes::Bytes| tx.blocking_send(Ok(frame)).is_ok();
         // A preview that cannot be sent means the daemon hung up, and the
         // transcription stops rather than finish for nobody.
-        let result = run_transcription(slot, &state, audio, sample_rate, language, |text| {
+        let result = run_transcription(slot, &state, input, |text| {
             send(sse("preview", &json!({ "text": text })))
         });
         let _ = match result {
