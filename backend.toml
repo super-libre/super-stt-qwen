@@ -17,7 +17,7 @@
     # selected model is named by it.
     source = "github.com/super-libre/super-stt-qwen"
     name = "Qwen ASR"
-    version = "0.1.1"
+    version = "0.1.2"
     kind = "subprocess"
     entrypoint = "super-voice-backend-qwen-asr"
     contract = "v4"
